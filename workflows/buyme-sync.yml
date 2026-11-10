@@ -1,0 +1,27 @@
+name: Scheduled BuyMe Ingestion
+
+on:
+  schedule:
+    - cron: '0 2 * * *' # הרצה אוטומטית בכל לילה ב-02:00 UTC
+  workflow_dispatch: # מאפשר הרצה ידנית בלחיצת כפתור מ-GitHub
+
+jobs:
+  sync-buyme:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v3
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: 18
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run BuyMe Live Sync
+        run: node scripts/syncBuyMeCategory.js
+        env:
+          EXPO_PUBLIC_SUPABASE_URL: ${{ secrets.EXPO_PUBLIC_SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
