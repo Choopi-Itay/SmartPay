@@ -71,6 +71,7 @@ async function syncAllBuyMeData() {
           club_id: club.id,
           brand_name: item.name || item.title || item.supplier_name || item.brand_name,
           discount_percentage: Number(item.discount || item.discount_rate || item.cashback || 10),
+          discount_type: 'voucher', // 👈 הגדרה מפורשת של סוג ההנחה
           priority_order: 1,
           stacks_with_sales: true,
           special_notes: `תו BuyMe דיגיטלי (קטגוריה ${catId})`,
