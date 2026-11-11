@@ -1,0 +1,27 @@
+name: Scheduled Bihad Ingestion
+
+on:
+  schedule:
+    - cron: '30 2 * * *' # ירוץ אוטומטית בכל לילה ב-02:30 UTC
+  workflow_dispatch:     # מאפשר הרצה ידנית בלחיצת כפתור
+
+jobs:
+  sync-bihad:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Run Bihad Live Sync
+        run: node scripts/syncBihad.js
+        env:
+          EXPO_PUBLIC_SUPABASE_URL: ${{ secrets.EXPO_PUBLIC_SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
