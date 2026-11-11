@@ -4,7 +4,7 @@ on:
   schedule:
     - cron: '0 2 * * *' # הרצה אוטומטית בכל לילה ב-02:00 UTC
   workflow_dispatch: # מאפשר הרצה ידנית בלחיצת כפתור מ-GitHub
-
+ 
 jobs:
   sync-buyme:
     runs-on: ubuntu-latest
