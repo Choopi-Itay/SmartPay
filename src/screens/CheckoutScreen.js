@@ -1,9 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import { 
   StyleSheet, Text, View, TouchableOpacity, TextInput, ScrollView, 
-  Alert, Keyboard, Modal 
+  Alert, Keyboard, Modal, ActivityIndicator 
 } from 'react-native';
 import { runOptimization, getDaysUntilExpiry } from '../utils/optimizer';
+import { findBestClubBenefits } from '../services/clubBenefits';
 
 export default function CheckoutScreen({ userWallet, availableBrands, onToggleLock, onConfirmPurchase }) {
   const [storeName, setStoreName] = useState('');
@@ -11,16 +12,49 @@ export default function CheckoutScreen({ userWallet, availableBrands, onToggleLo
   const [recommendation, setRecommendation] = useState(null);
   const [showDropdown, setShowDropdown] = useState(false);
 
+  // סטייט להטבות מועדון ("ביחד בשבילך")
+  const [clubBenefits, setClubBenefits] = useState([]);
+  const [loadingClubBenefits, setLoadingClubBenefits] = useState(false);
+
   // סטייט למודאל ברקוד במחשבון הקופה
   const [barcodeModalVisible, setBarcodeModalVisible] = useState(false);
   const [selectedItemForBarcode, setSelectedItemForBarcode] = useState(null);
 
-  // אם היתרות בארנק משתנות בזמן שיש תוכנית פעילה, נחשב מחדש אוטומטית שיהיה מעודכן!
+  // אם היתרות בארנק משתנות בזמן שיש תוכנית פעילה, נחשב מחדש אוטומטית
   useEffect(() => {
     if (recommendation && storeName && amount && parseFloat(amount) > 0) {
       setRecommendation(runOptimization(userWallet, amount, storeName));
     }
   }, [userWallet]);
+
+  // שליפת הטבות מועדון מ-Supabase בכל שינוי של שם החנות (עם Debounce למניעת עומס)
+  useEffect(() => {
+    const query = storeName.trim();
+    if (query.length < 2) {
+      setClubBenefits([]);
+      return;
+    }
+
+    let isActive = true;
+    const timer = setTimeout(async () => {
+      setLoadingClubBenefits(true);
+      try {
+        const results = await findBestClubBenefits(query);
+        if (isActive) {
+          setClubBenefits(results);
+        }
+      } catch (err) {
+        console.log('Error loading club benefits in checkout:', err);
+      } finally {
+        if (isActive) setLoadingClubBenefits(false);
+      }
+    }, 350);
+
+    return () => {
+      isActive = false;
+      clearTimeout(timer);
+    };
+  }, [storeName]);
 
   const matchingBrands = availableBrands.filter(brand =>
     brand.name.toLowerCase().includes(storeName.trim().toLowerCase())
@@ -35,7 +69,7 @@ export default function CheckoutScreen({ userWallet, availableBrands, onToggleLo
     }
   };
 
-  const calculatePayment = () => {
+  const calculatePayment = async () => {
     Keyboard.dismiss();
     setShowDropdown(false);
     if (!amount || parseFloat(amount) <= 0) {
@@ -47,6 +81,15 @@ export default function CheckoutScreen({ userWallet, availableBrands, onToggleLo
       return;
     }
     setRecommendation(runOptimization(userWallet, amount, storeName));
+
+    // רענון מיידי של הטבות המועדון בלחיצה על כפתור החישוב
+    setLoadingClubBenefits(true);
+    try {
+      const results = await findBestClubBenefits(storeName);
+      setClubBenefits(results);
+    } finally {
+      setLoadingClubBenefits(false);
+    }
   };
 
   const excludeItemFromPlan = (itemId) => {
@@ -70,6 +113,8 @@ export default function CheckoutScreen({ userWallet, availableBrands, onToggleLo
       Alert.alert('אין ברקוד', 'לפריט זה לא הוגדר קוד או ברקוד במערכת.');
     }
   };
+
+  const numericAmount = parseFloat(amount) || 0;
 
   return (
     <ScrollView contentContainerStyle={{ paddingBottom: 40 }} style={{ zIndex: 10 }}>
@@ -158,6 +203,67 @@ export default function CheckoutScreen({ userWallet, availableBrands, onToggleLo
           <Text style={styles.calcButtonText}>חשב הרכב תשלום אופטימלי</Text>
         </TouchableOpacity>
       </View>
+
+      {/* כרטיסיית הטבות מועדון "ביחד בשבילך" (טעינת ארנק / שוברים) */}
+      {(loadingClubBenefits || clubBenefits.length > 0) && (
+        <View style={styles.clubCard}>
+          <View style={styles.clubHeaderRow}>
+            <Text style={styles.clubCardTitle}>🏛️ הטבות מועדון "ביחד בשבילך"</Text>
+            {loadingClubBenefits && <ActivityIndicator size="small" color="#0369A1" />}
+          </View>
+
+          {!loadingClubBenefits && clubBenefits.map((benefit) => {
+            const discount = Number(benefit.discount_percent || 0);
+            const applicableAmount = benefit.monthly_limit
+              ? Math.min(numericAmount, Number(benefit.monthly_limit))
+              : numericAmount;
+            const potentialSavings = discount > 0 && numericAmount > 0
+              ? (applicableAmount * discount) / 100
+              : 0;
+            const finalPay = numericAmount - potentialSavings;
+
+            return (
+              <View key={benefit.id} style={styles.clubBenefitItem}>
+                <View style={styles.clubItemTopRow}>
+                  <Text style={styles.clubBenefitName}>{benefit.title}</Text>
+                  {discount > 0 && (
+                    <View style={styles.discountBadge}>
+                      <Text style={styles.discountBadgeText}>{discount}% הנחה</Text>
+                    </View>
+                  )}
+                </View>
+
+                <Text style={styles.clubWalletSub}>
+                  {benefit.wallet_name || benefit.short_description}
+                </Text>
+
+                {benefit.redim_type && (
+                  <Text style={styles.clubMetaText}>📍 אופן מימוש: {benefit.redim_type}</Text>
+                )}
+
+                {benefit.monthly_limit ? (
+                  <Text style={styles.clubMetaText}>
+                    📊 תקרת טעינה חודשית במועדון: ₪{benefit.monthly_limit}
+                  </Text>
+                ) : null}
+
+                {potentialSavings > 0 && (
+                  <View style={styles.clubCalcBox}>
+                    <Text style={styles.clubSavingsText}>
+                      💡 בטעינת הארנק תחסוך ₪{potentialSavings.toFixed(2)} (תשלם ₪{finalPay.toFixed(2)})
+                    </Text>
+                    {benefit.monthly_limit && numericAmount > Number(benefit.monthly_limit) && (
+                      <Text style={styles.clubLimitWarning}>
+                        * ההנחה חושבה עד לתקרה החודשית (₪{benefit.monthly_limit})
+                      </Text>
+                    )}
+                  </View>
+                )}
+              </View>
+            );
+          })}
+        </View>
+      )}
 
       {recommendation && (
         <View style={styles.resultCard}>
@@ -287,7 +393,23 @@ const styles = StyleSheet.create({
   dropdownText: { fontSize: 15, color: '#0F172A', textAlign: 'right' },
   calcButton: { backgroundColor: '#16A34A', padding: 16, borderRadius: 10, alignItems: 'center' },
   calcButtonText: { color: '#FFF', fontSize: 18, fontWeight: 'bold' },
-  resultCard: { marginTop: 24, backgroundColor: '#EFF6FF', padding: 20, borderRadius: 16, borderWidth: 1, borderColor: '#BFDBFE' },
+
+  // סגנונות לכרטיסיית הטבות המועדון
+  clubCard: { marginTop: 20, backgroundColor: '#F0F9FF', padding: 16, borderRadius: 16, borderWidth: 1, borderColor: '#BAE6FD' },
+  clubHeaderRow: { flexDirection: 'row-reverse', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 },
+  clubCardTitle: { fontSize: 17, fontWeight: 'bold', color: '#0369A1', textAlign: 'right' },
+  clubBenefitItem: { backgroundColor: '#FFF', padding: 12, borderRadius: 10, marginTop: 8, borderWidth: 1, borderColor: '#E0F2FE' },
+  clubItemTopRow: { flexDirection: 'row-reverse', justifyContent: 'space-between', alignItems: 'center' },
+  clubBenefitName: { fontSize: 15, fontWeight: 'bold', color: '#0F172A', flex: 1, textAlign: 'right', marginLeft: 8 },
+  discountBadge: { backgroundColor: '#DCFCE7', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6 },
+  discountBadgeText: { color: '#166534', fontWeight: 'bold', fontSize: 13 },
+  clubWalletSub: { fontSize: 13, color: '#334155', textAlign: 'right', marginTop: 4 },
+  clubMetaText: { fontSize: 12, color: '#64748B', textAlign: 'right', marginTop: 3 },
+  clubCalcBox: { marginTop: 8, backgroundColor: '#F0FDF4', padding: 8, borderRadius: 8, borderWidth: 1, borderColor: '#BBF7D0' },
+  clubSavingsText: { fontSize: 13, fontWeight: 'bold', color: '#15803D', textAlign: 'right' },
+  clubLimitWarning: { fontSize: 11, color: '#B45309', textAlign: 'right', marginTop: 2 },
+
+  resultCard: { marginTop: 20, backgroundColor: '#EFF6FF', padding: 20, borderRadius: 16, borderWidth: 1, borderColor: '#BFDBFE' },
   resultTitle: { fontSize: 20, fontWeight: 'bold', color: '#1E40AF', textAlign: 'right' },
   savingsHeader: { fontSize: 18, fontWeight: 'bold', color: '#16A34A', textAlign: 'right', marginVertical: 8 },
   planItem: { backgroundColor: '#FFF', padding: 14, borderRadius: 10, marginVertical: 8, borderWidth: 1, borderColor: '#E2E8F0' },
