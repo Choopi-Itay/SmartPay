@@ -1,64 +1,90 @@
 import React, { useState, useEffect } from 'react';
 import { 
   StyleSheet, Text, View, TouchableOpacity, TextInput, ScrollView, 
-  Alert, Keyboard, Modal, ActivityIndicator 
+  Alert, Keyboard, Modal, ActivityIndicator, Linking 
 } from 'react-native';
 import { runOptimization, getDaysUntilExpiry } from '../utils/optimizer';
-import { findBestClubBenefits } from '../services/clubBenefits';
+import { 
+  searchClubChains, 
+  findWalletPaymentBenefits, 
+  findCatalogPromotions 
+} from '../services/clubBenefits';
 
-export default function CheckoutScreen({ userWallet, availableBrands, onToggleLock, onConfirmPurchase }) {
+export default function CheckoutScreen({ 
+  userWallet, availableBrands, hasHistadrut = true, onToggleLock, onConfirmPurchase 
+}) {
   const [storeName, setStoreName] = useState('');
   const [amount, setAmount] = useState('');
   const [recommendation, setRecommendation] = useState(null);
   const [showDropdown, setShowDropdown] = useState(false);
 
-  // סטייט להטבות מועדון ("ביחד בשבילך")
-  const [clubBenefits, setClubBenefits] = useState([]);
-  const [loadingClubBenefits, setLoadingClubBenefits] = useState(false);
+  // רשתות להשלמה אוטומטית מהמועדון
+  const [clubChainSuggestions, setClubChainSuggestions] = useState([]);
+
+  // הפרדה בין שיטות תשלום (ארנקים) לבין מבצעי מוצר (קטלוג)
+  const [walletBenefits, setWalletBenefits] = useState([]);
+  const [catalogPromotions, setCatalogPromotions] = useState([]);
+  const [showPromotions, setShowPromotions] = useState(false);
+  const [loadingClubData, setLoadingClubData] = useState(false);
 
   // סטייט למודאל ברקוד במחשבון הקופה
   const [barcodeModalVisible, setBarcodeModalVisible] = useState(false);
   const [selectedItemForBarcode, setSelectedItemForBarcode] = useState(null);
 
-  // אם היתרות בארנק משתנות בזמן שיש תוכנית פעילה, נחשב מחדש אוטומטית
   useEffect(() => {
     if (recommendation && storeName && amount && parseFloat(amount) > 0) {
       setRecommendation(runOptimization(userWallet, amount, storeName));
     }
   }, [userWallet]);
 
-  // שליפת הטבות מועדון מ-Supabase בכל שינוי של שם החנות (עם Debounce למניעת עומס)
+  // שליפת הצעות לרשימה הנפתחת + ארנקי תשלום + מבצעי מוצר
   useEffect(() => {
     const query = storeName.trim();
-    if (query.length < 2) {
-      setClubBenefits([]);
+    if (!hasHistadrut || query.length < 2) {
+      setClubChainSuggestions([]);
+      setWalletBenefits([]);
+      setCatalogPromotions([]);
+      setShowPromotions(false);
       return;
     }
 
     let isActive = true;
     const timer = setTimeout(async () => {
-      setLoadingClubBenefits(true);
+      setLoadingClubData(true);
       try {
-        const results = await findBestClubBenefits(query);
+        const [chains, wallets, promos] = await Promise.all([
+          searchClubChains(query),
+          findWalletPaymentBenefits(query),
+          findCatalogPromotions(query),
+        ]);
         if (isActive) {
-          setClubBenefits(results);
+          setClubChainSuggestions(chains);
+          setWalletBenefits(wallets);
+          setCatalogPromotions(promos);
         }
       } catch (err) {
-        console.log('Error loading club benefits in checkout:', err);
+        console.log('Error loading club data:', err);
       } finally {
-        if (isActive) setLoadingClubBenefits(false);
+        if (isActive) setLoadingClubData(false);
       }
-    }, 350);
+    }, 300);
 
     return () => {
       isActive = false;
       clearTimeout(timer);
     };
-  }, [storeName]);
+  }, [storeName, hasHistadrut]);
 
-  const matchingBrands = availableBrands.filter(brand =>
-    brand.name.toLowerCase().includes(storeName.trim().toLowerCase())
-  );
+  // מיזוג מותגים אישיים + רשתות המועדון לרשימה הנפתחת ללא כפילויות
+  const localMatching = availableBrands
+    .filter(b => b.name.toLowerCase().includes(storeName.trim().toLowerCase()))
+    .map(b => ({ name: b.name, source: 'local' }));
+
+  const clubOnlyMatching = (hasHistadrut ? clubChainSuggestions : [])
+    .filter(name => !localMatching.some(l => l.name.toLowerCase() === name.toLowerCase()))
+    .map(name => ({ name, source: 'histadrut' }));
+
+  const combinedDropdownBrands = [...localMatching, ...clubOnlyMatching];
 
   const selectStoreFromDropdown = (brandName) => {
     setStoreName(brandName);
@@ -82,13 +108,20 @@ export default function CheckoutScreen({ userWallet, availableBrands, onToggleLo
     }
     setRecommendation(runOptimization(userWallet, amount, storeName));
 
-    // רענון מיידי של הטבות המועדון בלחיצה על כפתור החישוב
-    setLoadingClubBenefits(true);
-    try {
-      const results = await findBestClubBenefits(storeName);
-      setClubBenefits(results);
-    } finally {
-      setLoadingClubBenefits(false);
+    if (hasHistadrut) {
+      setLoadingClubData(true);
+      try {
+        const [wallets, promos] = await Promise.all([
+          findWalletPaymentBenefits(storeName),
+          findCatalogPromotions(storeName),
+        ]);
+        setWalletBenefits(wallets);
+        setCatalogPromotions(promos);
+      } catch (err) {
+        console.log('Error calculating club data:', err);
+      } finally {
+        setLoadingClubData(false);
+      }
     }
   };
 
@@ -165,19 +198,22 @@ export default function CheckoutScreen({ userWallet, availableBrands, onToggleLo
                 setRecommendation(runOptimization(userWallet, amount, text));
               }
             }}
-            placeholder="הקלד שם חנות או בחר מהרשימה..."
+            placeholder="הקלד שם חנות (לדוגמה: גולף)..."
           />
 
-          {showDropdown && matchingBrands.length > 0 && (
+          {showDropdown && combinedDropdownBrands.length > 0 && (
             <View style={styles.dropdownContainer}>
-              <ScrollView nestedScrollEnabled={true} style={{ maxHeight: 160 }}>
-                {matchingBrands.map(brand => (
+              <ScrollView nestedScrollEnabled={true} style={{ maxHeight: 180 }}>
+                {combinedDropdownBrands.map((brand, idx) => (
                   <TouchableOpacity
-                    key={brand.id}
+                    key={`${brand.name}_${idx}`}
                     style={styles.dropdownRow}
                     onPress={() => selectStoreFromDropdown(brand.name)}
                   >
-                    <Text style={styles.dropdownText}>🏷️ {brand.name}</Text>
+                    <Text style={styles.dropdownText}>
+                      {brand.source === 'histadrut' ? '🏛️ ' : '🏷️ '}
+                      {brand.name}
+                    </Text>
                   </TouchableOpacity>
                 ))}
               </ScrollView>
@@ -204,15 +240,15 @@ export default function CheckoutScreen({ userWallet, availableBrands, onToggleLo
         </TouchableOpacity>
       </View>
 
-      {/* כרטיסיית הטבות מועדון "ביחד בשבילך" (טעינת ארנק / שוברים) */}
-      {(loadingClubBenefits || clubBenefits.length > 0) && (
+      {/* 1. שיטות תשלום — ארנקי מועדון "ביחד בשבילך" */}
+      {hasHistadrut && (loadingClubData || walletBenefits.length > 0) && (
         <View style={styles.clubCard}>
           <View style={styles.clubHeaderRow}>
-            <Text style={styles.clubCardTitle}>🏛️ הטבות מועדון "ביחד בשבילך"</Text>
-            {loadingClubBenefits && <ActivityIndicator size="small" color="#0369A1" />}
+            <Text style={styles.clubCardTitle}>🏛️ תשלום דרך ארנק "ביחד בשבילך"</Text>
+            {loadingClubData && <ActivityIndicator size="small" color="#0369A1" />}
           </View>
 
-          {!loadingClubBenefits && clubBenefits.map((benefit) => {
+          {!loadingClubData && walletBenefits.map((benefit) => {
             const discount = Number(benefit.discount_percent || 0);
             const applicableAmount = benefit.monthly_limit
               ? Math.min(numericAmount, Number(benefit.monthly_limit))
@@ -233,12 +269,10 @@ export default function CheckoutScreen({ userWallet, availableBrands, onToggleLo
                   )}
                 </View>
 
-                <Text style={styles.clubWalletSub}>
-                  {benefit.wallet_name || benefit.short_description}
-                </Text>
+                <Text style={styles.clubWalletSub}>{benefit.wallet_name}</Text>
 
                 {benefit.redim_type && (
-                  <Text style={styles.clubMetaText}>📍 אופן מימוש: {benefit.redim_type}</Text>
+                  <Text style={styles.clubMetaText}>📍 {benefit.redim_type}</Text>
                 )}
 
                 {benefit.monthly_limit ? (
@@ -265,9 +299,10 @@ export default function CheckoutScreen({ userWallet, availableBrands, onToggleLo
         </View>
       )}
 
+      {/* 2. תוכנית תשלום משוברים וכרטיסים בארנק האישי */}
       {recommendation && (
         <View style={styles.resultCard}>
-          <Text style={styles.resultTitle}>🎯 תוכנית תשלום מומלצת עבור {storeName}:</Text>
+          <Text style={styles.resultTitle}>🎯 תוכנית תשלום מהארנק האישי עבור {storeName}:</Text>
           <Text style={styles.savingsHeader}>
             חיסכון כולל: ₪{recommendation.totalSavings.toFixed(2)} ({recommendation.effectiveDiscount}%)
           </Text>
@@ -322,7 +357,38 @@ export default function CheckoutScreen({ userWallet, availableBrands, onToggleLo
         </View>
       )}
 
-      {/* מודאל הצגת ברקוד לקופה מתוך מחשבון הקופה */}
+      {/* 3. אזור נפרד למבצעי מוצר וקופונים של הרשת */}
+      {hasHistadrut && catalogPromotions.length > 0 && (
+        <View style={styles.promoSection}>
+          <TouchableOpacity 
+            style={styles.promoHeaderBtn}
+            onPress={() => setShowPromotions(prev => !prev)}
+          >
+            <Text style={styles.promoHeaderTitle}>
+              🎁 מבצעים והטבות מוצר ברשת ({catalogPromotions.length})
+            </Text>
+            <Text style={styles.promoToggleText}>
+              {showPromotions ? '▲ הסתר' : '▼ הצג מבצעים'}
+            </Text>
+          </TouchableOpacity>
+
+          {showPromotions && catalogPromotions.map((promo) => (
+            <View key={promo.id} style={styles.promoItemCard}>
+              <Text style={styles.promoItemTitle}>{promo.title}</Text>
+              {promo.short_description ? (
+                <Text style={styles.promoItemDesc}>{promo.short_description}</Text>
+              ) : null}
+              {promo.url ? (
+                <TouchableOpacity onPress={() => Linking.openURL(promo.url)}>
+                  <Text style={styles.promoLink}>לפרטי ההטבה באתר המועדון ↗</Text>
+                </TouchableOpacity>
+              ) : null}
+            </View>
+          ))}
+        </View>
+      )}
+
+      {/* מודאל הצגת ברקוד לקופה */}
       <Modal
         visible={barcodeModalVisible}
         animationType="fade"
@@ -394,7 +460,7 @@ const styles = StyleSheet.create({
   calcButton: { backgroundColor: '#16A34A', padding: 16, borderRadius: 10, alignItems: 'center' },
   calcButtonText: { color: '#FFF', fontSize: 18, fontWeight: 'bold' },
 
-  // סגנונות לכרטיסיית הטבות המועדון
+  // כרטיסיית שיטות תשלום של המועדון (ארנקים)
   clubCard: { marginTop: 20, backgroundColor: '#F0F9FF', padding: 16, borderRadius: 16, borderWidth: 1, borderColor: '#BAE6FD' },
   clubHeaderRow: { flexDirection: 'row-reverse', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 },
   clubCardTitle: { fontSize: 17, fontWeight: 'bold', color: '#0369A1', textAlign: 'right' },
@@ -409,6 +475,16 @@ const styles = StyleSheet.create({
   clubSavingsText: { fontSize: 13, fontWeight: 'bold', color: '#15803D', textAlign: 'right' },
   clubLimitWarning: { fontSize: 11, color: '#B45309', textAlign: 'right', marginTop: 2 },
 
+  // אזור מבצעי מוצר נפרד (קטלוג)
+  promoSection: { marginTop: 18, backgroundColor: '#FFFBEB', padding: 14, borderRadius: 14, borderWidth: 1, borderColor: '#FDE68A' },
+  promoHeaderBtn: { flexDirection: 'row-reverse', justifyContent: 'space-between', alignItems: 'center' },
+  promoHeaderTitle: { fontSize: 15, fontWeight: 'bold', color: '#92400E' },
+  promoToggleText: { fontSize: 13, fontWeight: '600', color: '#B45309' },
+  promoItemCard: { backgroundColor: '#FFF', padding: 12, borderRadius: 10, marginTop: 10, borderWidth: 1, borderColor: '#FEF3C7' },
+  promoItemTitle: { fontSize: 14, fontWeight: 'bold', color: '#1E293B', textAlign: 'right' },
+  promoItemDesc: { fontSize: 12, color: '#475569', textAlign: 'right', marginTop: 4 },
+  promoLink: { fontSize: 12, color: '#0284C7', fontWeight: '600', textAlign: 'right', marginTop: 6 },
+
   resultCard: { marginTop: 20, backgroundColor: '#EFF6FF', padding: 20, borderRadius: 16, borderWidth: 1, borderColor: '#BFDBFE' },
   resultTitle: { fontSize: 20, fontWeight: 'bold', color: '#1E40AF', textAlign: 'right' },
   savingsHeader: { fontSize: 18, fontWeight: 'bold', color: '#16A34A', textAlign: 'right', marginVertical: 8 },
@@ -419,12 +495,10 @@ const styles = StyleSheet.create({
   excludeBtnText: { color: '#991B1B', fontSize: 12, fontWeight: 'bold' },
   planAmount: { fontSize: 15, textAlign: 'right', color: '#475569', marginTop: 4 },
   planSavings: { fontSize: 14, textAlign: 'right', color: '#16A34A', fontWeight: '600', marginTop: 2 },
-  
   showBarcodeCheckoutBtnFull: { backgroundColor: '#0284C7', padding: 12, borderRadius: 8, alignItems: 'center' },
   showBarcodeCheckoutBtnFullText: { color: '#FFF', fontSize: 15, fontWeight: 'bold' },
   actionBtn: { backgroundColor: '#475569', padding: 12, borderRadius: 8, alignItems: 'center' },
   actionBtnText: { color: '#FFF', fontSize: 15, fontWeight: 'bold' },
-
   confirmBtn: { backgroundColor: '#0F172A', padding: 16, borderRadius: 10, alignItems: 'center', marginTop: 16 },
   confirmBtnText: { color: '#FFF', fontSize: 16, fontWeight: 'bold' },
   warningText: { fontSize: 13, color: '#DC2626', fontWeight: 'bold', textAlign: 'right', marginTop: 2 },

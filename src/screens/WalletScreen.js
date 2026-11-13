@@ -11,8 +11,10 @@ const { width } = Dimensions.get('window');
 export default function WalletScreen({ 
   userWallet, 
   availableBrands, 
+  hasHistadrut = true,
+  onToggleHistadrut,
   onAddItem, 
-  onUpdateItem, // נוודא שנקבל פונקציה לעדכון (או שננהל את זה בצורה נקייה)
+  onUpdateItem,
   onDeleteItem, 
   onToggleLock 
 }) {
@@ -78,14 +80,12 @@ export default function WalletScreen({
     };
 
     if (editingItemId) {
-      // אם אנחנו במצב עריכה
       if (onUpdateItem) {
         onUpdateItem(editingItemId, payload, selectedBrands);
       } else {
         Alert.alert('עדכון', 'פונקציית עדכון טרם הוגדרה בקומפוננטת האב');
       }
     } else {
-      // מצב הוספה רגילה
       onAddItem({ ...payload, is_locked: false }, selectedBrands);
     }
     
@@ -131,6 +131,26 @@ export default function WalletScreen({
       >
         <Text style={styles.addButtonText}>+ הוסף שובר או כרטיס לארנק</Text>
       </TouchableOpacity>
+
+      {/* כרטיסיית מועדון צרכנות ("ביחד בשבילך") */}
+      <View style={[styles.clubMembershipCard, !hasHistadrut && styles.clubMembershipCardInactive]}>
+        <View style={styles.clubMembershipRow}>
+          <View style={{ flex: 1, marginRight: 12 }}>
+            <Text style={styles.clubMembershipTitle}>🏛️ מועדון "ביחד בשבילך" (הסתדרות)</Text>
+            <Text style={styles.clubMembershipSub}>
+              {hasHistadrut 
+                ? 'פעיל — ארנקי ההנחה ומבצעי הרשתות מוצגים במחשבון הקופה' 
+                : 'כבוי — הפעל אם ברשותך כרטיס מועדון של ההסתדרות'}
+            </Text>
+          </View>
+          <Switch
+            value={hasHistadrut}
+            onValueChange={onToggleHistadrut}
+            trackColor={{ false: '#CBD5E1', true: '#38BDF8' }}
+            thumbColor={hasHistadrut ? '#0284C7' : '#F1F5F9'}
+          />
+        </View>
+      </View>
 
       {/* רשימת הפריטים בארנק */}
       {userWallet.length === 0 ? (
@@ -434,10 +454,40 @@ const styles = StyleSheet.create({
     padding: 15, 
     borderRadius: 12, 
     alignItems: 'center', 
-    marginBottom: 20,
+    marginBottom: 14,
     elevation: 2 
   },
   addButtonText: { color: '#FFF', fontSize: 16, fontWeight: 'bold' },
+
+  // כרטיסיית מועדון צרכנות
+  clubMembershipCard: {
+    backgroundColor: '#F0F9FF',
+    borderRadius: 12,
+    padding: 14,
+    marginBottom: 18,
+    borderWidth: 1,
+    borderColor: '#BAE6FD',
+  },
+  clubMembershipCardInactive: {
+    backgroundColor: '#F8FAFC',
+    borderColor: '#E2E8F0',
+  },
+  clubMembershipRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  clubMembershipTitle: {
+    fontSize: 15,
+    fontWeight: 'bold',
+    color: '#0F172A',
+  },
+  clubMembershipSub: {
+    fontSize: 12,
+    color: '#64748B',
+    marginTop: 3,
+  },
+
   emptyContainer: { alignItems: 'center', marginTop: 40, padding: 20 },
   emptyText: { fontSize: 18, fontWeight: 'bold', color: '#475569', marginBottom: 8 },
   emptySubText: { fontSize: 14, color: '#94A3B8', textAlign: 'center' },

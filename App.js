@@ -25,6 +25,7 @@ import { fetchLiveBuyMeData } from './src/services/buymeService';
 const DEFAULT_BRANDS = ['שופרסל', 'Fox', 'BuyMe', 'המשביר', 'רמי לוי', 'סופר-פארם', 'קסטרו', 'כללי'];
 
 export default function App() {
+  const [hasHistadrut, setHasHistadrut] = useState(true);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [loading, setLoading] = useState(false);
   const [currentTab, setCurrentTab] = useState('checkout');
@@ -284,6 +285,7 @@ export default function App() {
             <CheckoutScreen 
               userWallet={userWallet}
               availableBrands={availableBrands}
+              hasHistadrut={hasHistadrut}
               onToggleLock={handleToggleLock}
               onConfirmPurchase={handleConfirmPurchase}
             />
@@ -291,6 +293,8 @@ export default function App() {
             <WalletScreen 
               userWallet={userWallet}
               availableBrands={availableBrands}
+              hasHistadrut={hasHistadrut}
+              onToggleHistadrut={() => setHasHistadrut(prev => !prev)}
               onAddItem={handleAddItem}
               onUpdateItem={handleUpdateItem}
               onDeleteItem={handleDeleteItem}
