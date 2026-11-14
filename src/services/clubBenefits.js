@@ -27,18 +27,37 @@ export async function findWalletPaymentBenefits(merchantQuery) {
 
   const { data, error } = await supabase
     .from('club_benefits')
-    .select('id, external_id, title, discount_percent, wallet_name, monthly_limit, redim_type')
+    .select('id, external_id, club_source, title, discount_percent, wallet_name, monthly_limit, redim_type')
     .eq('is_active', true)
     .eq('benefit_type', 'wallet')
     .or(`title.ilike.%${cleanQuery}%,search_keywords.ilike.%${cleanQuery}%`)
     .order('discount_percent', { ascending: false, nullsFirst: false })
-    .limit(10);
+    .limit(15);
 
-  if (error) {
+  if (error || !data) {
     console.log('Error fetching wallet benefits:', error);
     return [];
   }
-  return data || [];
+
+  const lowerQuery = cleanQuery.toLowerCase();
+
+  // מיון חכם: 1. אחוז הנחה גבוה -> 2. התאמה מדויקת לשם החנות -> 3. שם קצר יותר
+  return data.sort((a, b) => {
+    const discDiff = Number(b.discount_percent || 0) - Number(a.discount_percent || 0);
+    if (discDiff !== 0) return discDiff;
+
+    const titleA = (a.title || '').trim().toLowerCase();
+    const titleB = (b.title || '').trim().toLowerCase();
+    const exactA = titleA === lowerQuery ? 1 : 0;
+    const exactB = titleB === lowerQuery ? 1 : 0;
+    if (exactA !== exactB) return exactB - exactA;
+
+    const startsA = titleA.startsWith(lowerQuery) ? 1 : 0;
+    const startsB = titleB.startsWith(lowerQuery) ? 1 : 0;
+    if (startsA !== startsB) return startsB - startsA;
+
+    return titleA.length - titleB.length;
+  });
 }
 
 // 3. שליפת מבצעי מוצר וקופונים בלבד (למשל "מצעי פלנל זוגי 100 ₪")

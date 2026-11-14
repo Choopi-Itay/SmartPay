@@ -16,6 +16,7 @@ export default function CheckoutScreen({
   const [storeName, setStoreName] = useState('');
   const [amount, setAmount] = useState('');
   const [recommendation, setRecommendation] = useState(null);
+  const [selectedStrategyIndex, setSelectedStrategyIndex] = useState(0);
   const [showDropdown, setShowDropdown] = useState(false);
 
   // רשתות להשלמה אוטומטית מהמועדון
@@ -23,6 +24,7 @@ export default function CheckoutScreen({
 
   // הפרדה בין שיטות תשלום (ארנקים) לבין מבצעי מוצר (קטלוג)
   const [walletBenefits, setWalletBenefits] = useState([]);
+  const [excludedClubIds, setExcludedClubIds] = useState([]);
   const [catalogPromotions, setCatalogPromotions] = useState([]);
   const [showPromotions, setShowPromotions] = useState(false);
   const [loadingClubData, setLoadingClubData] = useState(false);
@@ -31,15 +33,41 @@ export default function CheckoutScreen({
   const [barcodeModalVisible, setBarcodeModalVisible] = useState(false);
   const [selectedItemForBarcode, setSelectedItemForBarcode] = useState(null);
 
+  // המרת מזהי UUID / קודים לשמות מותגים קריאים מתוך availableBrands
+  const resolveBrandNames = (rawBrands) => {
+    if (!Array.isArray(rawBrands) || rawBrands.length === 0) return 'כללי / לא מוגדר';
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+    const cleanNames = rawBrands
+      .map(b => {
+        if (!b) return null;
+        const found = availableBrands.find(ab => String(ab.id) === String(b) || ab.name === b);
+        if (found) return found.name;
+        if (uuidRegex.test(String(b))) return null;
+        return String(b);
+      })
+      .filter(Boolean);
+
+    return cleanNames.length > 0 ? [...new Set(cleanNames)].join(', ') : 'כללי';
+  };
+
+  const getActiveClubWallets = (walletsList = walletBenefits, excludedList = excludedClubIds) => {
+    if (!hasHistadrut) return [];
+    return walletsList.filter(b => !excludedList.includes(`club_${b.id}`));
+  };
+
   useEffect(() => {
     if (recommendation && storeName && amount && parseFloat(amount) > 0) {
-      setRecommendation(runOptimization(userWallet, amount, storeName));
+      const res = runOptimization(userWallet, amount, storeName, getActiveClubWallets());
+      setRecommendation(res);
+      setSelectedStrategyIndex(0);
     }
-  }, [userWallet]);
+  }, [userWallet, walletBenefits, hasHistadrut, excludedClubIds]);
 
-  // שליפת הצעות לרשימה הנפתחת + ארנקי תשלום + מבצעי מוצר
   useEffect(() => {
     const query = storeName.trim();
+    setExcludedClubIds([]);
+
     if (!hasHistadrut || query.length < 2) {
       setClubChainSuggestions([]);
       setWalletBenefits([]);
@@ -75,7 +103,6 @@ export default function CheckoutScreen({
     };
   }, [storeName, hasHistadrut]);
 
-  // מיזוג מותגים אישיים + רשתות המועדון לרשימה הנפתחת ללא כפילויות
   const localMatching = availableBrands
     .filter(b => b.name.toLowerCase().includes(storeName.trim().toLowerCase()))
     .map(b => ({ name: b.name, source: 'local' }));
@@ -91,7 +118,9 @@ export default function CheckoutScreen({
     setShowDropdown(false);
     Keyboard.dismiss();
     if (amount && parseFloat(amount) > 0) {
-      setRecommendation(runOptimization(userWallet, amount, brandName));
+      const res = runOptimization(userWallet, amount, brandName, getActiveClubWallets());
+      setRecommendation(res);
+      setSelectedStrategyIndex(0);
     }
   };
 
@@ -106,8 +135,8 @@ export default function CheckoutScreen({
       Alert.alert('שגיאה', 'נא לבחור או להזין שם רשת / חנות');
       return;
     }
-    setRecommendation(runOptimization(userWallet, amount, storeName));
 
+    let currentWallets = walletBenefits;
     if (hasHistadrut) {
       setLoadingClubData(true);
       try {
@@ -115,6 +144,7 @@ export default function CheckoutScreen({
           findWalletPaymentBenefits(storeName),
           findCatalogPromotions(storeName),
         ]);
+        currentWallets = wallets;
         setWalletBenefits(wallets);
         setCatalogPromotions(promos);
       } catch (err) {
@@ -123,17 +153,37 @@ export default function CheckoutScreen({
         setLoadingClubData(false);
       }
     }
+
+    const activeClubs = getActiveClubWallets(currentWallets, excludedClubIds);
+    const res = runOptimization(userWallet, amount, storeName, activeClubs);
+    setRecommendation(res);
+    setSelectedStrategyIndex(0);
   };
 
-  const excludeItemFromPlan = (itemId) => {
-    onToggleLock(itemId);
-    const updatedWallet = userWallet.map(item => item.id === itemId ? { ...item, isLocked: true } : item);
-    setRecommendation(runOptimization(updatedWallet, amount, storeName));
+  const excludeItemFromPlan = (item) => {
+    if (item.type === 'ClubWallet') {
+      const nextExcluded = [...excludedClubIds, item.id];
+      setExcludedClubIds(nextExcluded);
+      const res = runOptimization(userWallet, amount, storeName, getActiveClubWallets(walletBenefits, nextExcluded));
+      setRecommendation(res);
+      setSelectedStrategyIndex(0);
+      return;
+    }
+
+    onToggleLock(item.id);
+    const updatedWallet = userWallet.map(w => w.id === item.id ? { ...w, isLocked: true } : w);
+    const res = runOptimization(updatedWallet, amount, storeName, getActiveClubWallets());
+    setRecommendation(res);
+    setSelectedStrategyIndex(0);
   };
+
+  const activeStrategy = recommendation?.strategies?.[selectedStrategyIndex] || recommendation;
 
   const handleConfirm = async () => {
-    await onConfirmPurchase(recommendation);
+    await onConfirmPurchase(activeStrategy);
     setRecommendation(null);
+    setSelectedStrategyIndex(0);
+    setExcludedClubIds([]);
     setAmount('');
   };
 
@@ -147,8 +197,6 @@ export default function CheckoutScreen({
     }
   };
 
-  const numericAmount = parseFloat(amount) || 0;
-
   return (
     <ScrollView contentContainerStyle={{ paddingBottom: 40 }} style={{ zIndex: 10 }}>
       <Text style={styles.headerTitle}>💰 מחשבון קופה מהיר</Text>
@@ -160,7 +208,9 @@ export default function CheckoutScreen({
         ) : (
           userWallet.map(item => {
             const days = getDaysUntilExpiry(item.expiryDate);
-            const brandText = item.applicableBrands?.length > 0 ? item.applicableBrands.join(', ') : 'לא מוגדר';
+            const brandText = resolveBrandNames(item.applicableBrands);
+            const typeIcon = item.type === 'CreditCard' ? '💳' : item.type === 'GiftCard' ? '🎁' : '🎫';
+
             return (
               <View key={item.id} style={styles.walletRowContainer}>
                 <View style={styles.walletRow}>
@@ -169,14 +219,16 @@ export default function CheckoutScreen({
                   </TouchableOpacity>
 
                   <Text style={[styles.walletName, item.isLocked && styles.lockedText]}>
-                    {item.name} {days < 30 ? `(⚠️ עוד ${days} ימים)` : ''}
+                    {typeIcon} {item.name} {days < 30 ? `(⚠️ עוד ${days} ימים)` : ''}
                   </Text>
                   
                   <Text style={[styles.walletBalance, item.isLocked && styles.lockedText]}>
-                    {item.type === 'Voucher' ? `₪${item.balance.toFixed(2)}` : 'אשראי'}
+                    {item.type === 'CreditCard'
+                      ? (item.discount > 0 ? `${item.discount}% הנחה` : 'אשראי')
+                      : `₪${Number(item.balance).toFixed(2)}`}
                   </Text>
                 </View>
-                <Text style={styles.brandTagText}>🏷️ מותגים: [{brandText}]</Text>
+                <Text style={styles.brandTagText}>🏷️ מותגים: {brandText}</Text>
               </View>
             );
           })
@@ -195,7 +247,9 @@ export default function CheckoutScreen({
               setStoreName(text);
               setShowDropdown(true);
               if (amount && parseFloat(amount) > 0) {
-                setRecommendation(runOptimization(userWallet, amount, text));
+                const res = runOptimization(userWallet, amount, text, getActiveClubWallets());
+                setRecommendation(res);
+                setSelectedStrategyIndex(0);
               }
             }}
             placeholder="הקלד שם חנות (לדוגמה: גולף)..."
@@ -228,7 +282,9 @@ export default function CheckoutScreen({
           onChangeText={(text) => {
             setAmount(text);
             if (storeName) {
-              setRecommendation(runOptimization(userWallet, text, storeName));
+              const res = runOptimization(userWallet, text, storeName, getActiveClubWallets());
+              setRecommendation(res);
+              setSelectedStrategyIndex(0);
             }
           }}
           keyboardType="numeric"
@@ -240,81 +296,77 @@ export default function CheckoutScreen({
         </TouchableOpacity>
       </View>
 
-      {/* 1. שיטות תשלום — ארנקי מועדון "ביחד בשבילך" */}
-      {hasHistadrut && (loadingClubData || walletBenefits.length > 0) && (
+      {/* תצוגה מקדימה של ארנקי מועדון לפני הזנת סכום */}
+      {hasHistadrut && !activeStrategy && (loadingClubData || walletBenefits.length > 0) && (
         <View style={styles.clubCard}>
           <View style={styles.clubHeaderRow}>
-            <Text style={styles.clubCardTitle}>🏛️ תשלום דרך ארנק "ביחד בשבילך"</Text>
+            <Text style={styles.clubCardTitle}>🏛️ ארנק "ביחד בשבילך" זמין לרשת זו</Text>
             {loadingClubData && <ActivityIndicator size="small" color="#0369A1" />}
           </View>
-
-          {!loadingClubData && walletBenefits.map((benefit) => {
-            const discount = Number(benefit.discount_percent || 0);
-            const applicableAmount = benefit.monthly_limit
-              ? Math.min(numericAmount, Number(benefit.monthly_limit))
-              : numericAmount;
-            const potentialSavings = discount > 0 && numericAmount > 0
-              ? (applicableAmount * discount) / 100
-              : 0;
-            const finalPay = numericAmount - potentialSavings;
-
-            return (
-              <View key={benefit.id} style={styles.clubBenefitItem}>
-                <View style={styles.clubItemTopRow}>
-                  <Text style={styles.clubBenefitName}>{benefit.title}</Text>
-                  {discount > 0 && (
-                    <View style={styles.discountBadge}>
-                      <Text style={styles.discountBadgeText}>{discount}% הנחה</Text>
-                    </View>
-                  )}
+          {!loadingClubData && walletBenefits.map((benefit) => (
+            <View key={benefit.id} style={styles.clubBenefitItem}>
+              <View style={styles.clubItemTopRow}>
+                <Text style={styles.clubBenefitName}>{benefit.title}</Text>
+                <View style={styles.discountBadge}>
+                  <Text style={styles.discountBadgeText}>{benefit.discount_percent}% הנחה</Text>
                 </View>
-
-                <Text style={styles.clubWalletSub}>{benefit.wallet_name}</Text>
-
-                {benefit.redim_type && (
-                  <Text style={styles.clubMetaText}>📍 {benefit.redim_type}</Text>
-                )}
-
-                {benefit.monthly_limit ? (
-                  <Text style={styles.clubMetaText}>
-                    📊 תקרת טעינה חודשית במועדון: ₪{benefit.monthly_limit}
-                  </Text>
-                ) : null}
-
-                {potentialSavings > 0 && (
-                  <View style={styles.clubCalcBox}>
-                    <Text style={styles.clubSavingsText}>
-                      💡 בטעינת הארנק תחסוך ₪{potentialSavings.toFixed(2)} (תשלם ₪{finalPay.toFixed(2)})
-                    </Text>
-                    {benefit.monthly_limit && numericAmount > Number(benefit.monthly_limit) && (
-                      <Text style={styles.clubLimitWarning}>
-                        * ההנחה חושבה עד לתקרה החודשית (₪{benefit.monthly_limit})
-                      </Text>
-                    )}
-                  </View>
-                )}
               </View>
-            );
-          })}
+              <Text style={styles.clubWalletSub}>{benefit.wallet_name}</Text>
+            </View>
+          ))}
         </View>
       )}
 
-      {/* 2. תוכנית תשלום משוברים וכרטיסים בארנק האישי */}
-      {recommendation && (
+      {/* תוכנית התשלום עם בחירת מסלולים */}
+      {activeStrategy && (
         <View style={styles.resultCard}>
-          <Text style={styles.resultTitle}>🎯 תוכנית תשלום מהארנק האישי עבור {storeName}:</Text>
+          <Text style={styles.resultTitle}>🎯 תוכנית תשלום עבור {storeName}:</Text>
+
+          {/* בורר מסלולים חלופיים (מופיע כשיש בחירה בין ניצול שוברים לשמירתם) */}
+          {recommendation?.strategies?.length > 1 && (
+            <View style={styles.strategyTabsRow}>
+              {recommendation.strategies.map((strat, idx) => {
+                const isSelected = idx === selectedStrategyIndex;
+                return (
+                  <TouchableOpacity
+                    key={strat.id}
+                    style={[styles.strategyTab, isSelected && styles.activeStrategyTab]}
+                    onPress={() => setSelectedStrategyIndex(idx)}
+                  >
+                    <Text style={[styles.strategyTabTitle, isSelected && styles.activeStrategyTabText]}>
+                      {strat.label}
+                    </Text>
+                    <Text style={[styles.strategyTabSub, isSelected && styles.activeStrategyTabText]}>
+                      חיסכון ₪{strat.totalSavings.toFixed(0)}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+          )}
+
+          {activeStrategy.subtitle ? (
+            <Text style={styles.strategySubtitle}>{activeStrategy.subtitle}</Text>
+          ) : null}
+
           <Text style={styles.savingsHeader}>
-            חיסכון כולל: ₪{recommendation.totalSavings.toFixed(2)} ({recommendation.effectiveDiscount}%)
+            חיסכון כולל: ₪{activeStrategy.totalSavings.toFixed(2)} ({activeStrategy.effectiveDiscount}%)
           </Text>
 
-          {recommendation.plan.length === 0 ? (
+          {activeStrategy.plan.length === 0 ? (
             <Text style={{ textAlign: 'center', color: '#64748B', marginVertical: 10 }}>לא נמצאו שוברים או כרטיסים תקפים לרשת זו</Text>
           ) : (
-            recommendation.plan.map((item, index) => (
-              <View key={index} style={styles.planItem}>
+            activeStrategy.plan.map((item, index) => (
+              <View 
+                key={index} 
+                style={[styles.planItem, item.type === 'ClubWallet' && styles.clubPlanItem]}
+              >
                 <View style={styles.planItemHeader}>
-                  <Text style={styles.planName}>{item.name}</Text>
-                  <TouchableOpacity style={styles.excludeBtn} onPress={() => excludeItemFromPlan(item.id)}>
+                  <Text style={styles.planName}>
+                    {item.type === 'ClubWallet' ? '🏛️ ' : item.type === 'CreditCard' ? '💳 ' : '🎫 '}
+                    {item.name}
+                  </Text>
+                  <TouchableOpacity style={styles.excludeBtn} onPress={() => excludeItemFromPlan(item)}>
                     <Text style={styles.excludeBtnText}>🚫 אל תשתמש</Text>
                   </TouchableOpacity>
                 </View>
@@ -322,7 +374,8 @@ export default function CheckoutScreen({
                 {item.daysLeft !== undefined && item.daysLeft < 30 && (
                   <Text style={styles.warningText}>⚠️ תו זה פג בעוד {item.daysLeft} ימים!</Text>
                 )}
-                <Text style={styles.planAmount}>סכום לתשלום: ₪{item.amount.toFixed(2)}</Text>
+
+                <Text style={styles.planAmount}>סכום לכיסוי בקופה: ₪{item.amount.toFixed(2)}</Text>
                 <Text style={styles.planSavings}>חיסכון: ₪{item.savings.toFixed(2)}</Text>
 
                 <View style={{ marginTop: 10 }}>
@@ -333,6 +386,16 @@ export default function CheckoutScreen({
                     >
                       <Text style={styles.showBarcodeCheckoutBtnFullText}>🔍 הצג ברקוד לקופה</Text>
                     </TouchableOpacity>
+                  ) : item.type === 'ClubWallet' ? (
+                    <View style={styles.clubActionBox}>
+                      <Text style={styles.clubActionTitle}>
+                        💳 טען ₪{item.amount.toFixed(2)} בארנק ({item.discountPercent}% הנחה)
+                      </Text>
+                      <Text style={styles.clubActionSub}>
+                        תשלום בפועל בכרטיס: ₪{item.actualPay.toFixed(2)}
+                        {item.redimType ? ` • ${item.redimType}` : ''}
+                      </Text>
+                    </View>
                   ) : (
                     <TouchableOpacity 
                       style={styles.actionBtn}
@@ -349,7 +412,7 @@ export default function CheckoutScreen({
             ))
           )}
 
-          {recommendation.plan.length > 0 && (
+          {activeStrategy.plan.length > 0 && (
             <TouchableOpacity style={styles.confirmBtn} onPress={handleConfirm}>
               <Text style={styles.confirmBtnText}>✓ ביצעתי את הקנייה (עדכן יתרה)</Text>
             </TouchableOpacity>
@@ -357,7 +420,7 @@ export default function CheckoutScreen({
         </View>
       )}
 
-      {/* 3. אזור נפרד למבצעי מוצר וקופונים של הרשת */}
+      {/* אזור נפרד למבצעי מוצר וקופונים של הרשת */}
       {hasHistadrut && catalogPromotions.length > 0 && (
         <View style={styles.promoSection}>
           <TouchableOpacity 
@@ -443,10 +506,10 @@ const styles = StyleSheet.create({
   headerTitle: { fontSize: 22, fontWeight: 'bold', textAlign: 'center', marginVertical: 15, color: '#0F172A' },
   walletStatusCard: { backgroundColor: '#F1F5F9', padding: 15, borderRadius: 12, marginBottom: 15, borderWidth: 1, borderColor: '#E2E8F0' },
   walletTitle: { fontSize: 14, fontWeight: 'bold', color: '#334155', marginBottom: 8, textAlign: 'right' },
-  walletRowContainer: { borderBottomWidth: 1, borderBottomColor: '#CBD5E1', paddingVertical: 6 },
+  walletRowContainer: { borderBottomWidth: 1, borderBottomColor: '#CBD5E1', paddingVertical: 8 },
   walletRow: { flexDirection: 'row-reverse', justifyContent: 'space-between', alignItems: 'center' },
-  brandTagText: { fontSize: 11, color: '#0284C7', textAlign: 'right', marginTop: 2 },
-  walletName: { fontSize: 14, color: '#475569' },
+  brandTagText: { fontSize: 12, color: '#0284C7', textAlign: 'right', marginTop: 3 },
+  walletName: { fontSize: 14, fontWeight: '600', color: '#1E293B', flex: 1, textAlign: 'right', marginHorizontal: 8 },
   walletBalance: { fontSize: 14, fontWeight: 'bold', color: '#0284C7' },
   lockToggleBtn: { backgroundColor: '#E2E8F0', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6 },
   lockIconText: { fontSize: 12, fontWeight: 'bold', color: '#334155' },
@@ -460,22 +523,16 @@ const styles = StyleSheet.create({
   calcButton: { backgroundColor: '#16A34A', padding: 16, borderRadius: 10, alignItems: 'center' },
   calcButtonText: { color: '#FFF', fontSize: 18, fontWeight: 'bold' },
 
-  // כרטיסיית שיטות תשלום של המועדון (ארנקים)
   clubCard: { marginTop: 20, backgroundColor: '#F0F9FF', padding: 16, borderRadius: 16, borderWidth: 1, borderColor: '#BAE6FD' },
   clubHeaderRow: { flexDirection: 'row-reverse', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 },
-  clubCardTitle: { fontSize: 17, fontWeight: 'bold', color: '#0369A1', textAlign: 'right' },
+  clubCardTitle: { fontSize: 16, fontWeight: 'bold', color: '#0369A1', textAlign: 'right' },
   clubBenefitItem: { backgroundColor: '#FFF', padding: 12, borderRadius: 10, marginTop: 8, borderWidth: 1, borderColor: '#E0F2FE' },
   clubItemTopRow: { flexDirection: 'row-reverse', justifyContent: 'space-between', alignItems: 'center' },
   clubBenefitName: { fontSize: 15, fontWeight: 'bold', color: '#0F172A', flex: 1, textAlign: 'right', marginLeft: 8 },
   discountBadge: { backgroundColor: '#DCFCE7', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6 },
   discountBadgeText: { color: '#166534', fontWeight: 'bold', fontSize: 13 },
   clubWalletSub: { fontSize: 13, color: '#334155', textAlign: 'right', marginTop: 4 },
-  clubMetaText: { fontSize: 12, color: '#64748B', textAlign: 'right', marginTop: 3 },
-  clubCalcBox: { marginTop: 8, backgroundColor: '#F0FDF4', padding: 8, borderRadius: 8, borderWidth: 1, borderColor: '#BBF7D0' },
-  clubSavingsText: { fontSize: 13, fontWeight: 'bold', color: '#15803D', textAlign: 'right' },
-  clubLimitWarning: { fontSize: 11, color: '#B45309', textAlign: 'right', marginTop: 2 },
 
-  // אזור מבצעי מוצר נפרד (קטלוג)
   promoSection: { marginTop: 18, backgroundColor: '#FFFBEB', padding: 14, borderRadius: 14, borderWidth: 1, borderColor: '#FDE68A' },
   promoHeaderBtn: { flexDirection: 'row-reverse', justifyContent: 'space-between', alignItems: 'center' },
   promoHeaderTitle: { fontSize: 15, fontWeight: 'bold', color: '#92400E' },
@@ -487,14 +544,25 @@ const styles = StyleSheet.create({
 
   resultCard: { marginTop: 20, backgroundColor: '#EFF6FF', padding: 20, borderRadius: 16, borderWidth: 1, borderColor: '#BFDBFE' },
   resultTitle: { fontSize: 20, fontWeight: 'bold', color: '#1E40AF', textAlign: 'right' },
+  strategyTabsRow: { flexDirection: 'row-reverse', gap: 8, marginTop: 12, marginBottom: 6 },
+  strategyTab: { flex: 1, backgroundColor: '#FFF', padding: 10, borderRadius: 10, borderWidth: 1, borderColor: '#93C5FD', alignItems: 'center' },
+  activeStrategyTab: { backgroundColor: '#1E40AF', borderColor: '#1E40AF' },
+  strategyTabTitle: { fontSize: 12, fontWeight: 'bold', color: '#1E40AF', textAlign: 'center' },
+  strategyTabSub: { fontSize: 11, color: '#475569', marginTop: 2 },
+  activeStrategyTabText: { color: '#FFF' },
+  strategySubtitle: { fontSize: 12, color: '#475569', textAlign: 'right', marginTop: 4 },
   savingsHeader: { fontSize: 18, fontWeight: 'bold', color: '#16A34A', textAlign: 'right', marginVertical: 8 },
   planItem: { backgroundColor: '#FFF', padding: 14, borderRadius: 10, marginVertical: 8, borderWidth: 1, borderColor: '#E2E8F0' },
+  clubPlanItem: { borderColor: '#38BDF8', backgroundColor: '#F8FAFC' },
   planItemHeader: { flexDirection: 'row-reverse', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 },
   planName: { fontSize: 16, fontWeight: 'bold', textAlign: 'right', color: '#0F172A', flex: 1 },
   excludeBtn: { backgroundColor: '#FEE2E2', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6, borderWidth: 1, borderColor: '#FCA5A5' },
   excludeBtnText: { color: '#991B1B', fontSize: 12, fontWeight: 'bold' },
   planAmount: { fontSize: 15, textAlign: 'right', color: '#475569', marginTop: 4 },
   planSavings: { fontSize: 14, textAlign: 'right', color: '#16A34A', fontWeight: '600', marginTop: 2 },
+  clubActionBox: { backgroundColor: '#E0F2FE', padding: 10, borderRadius: 8, borderWidth: 1, borderColor: '#BAE6FD' },
+  clubActionTitle: { fontSize: 14, fontWeight: 'bold', color: '#0369A1', textAlign: 'right' },
+  clubActionSub: { fontSize: 13, color: '#0F172A', textAlign: 'right', marginTop: 3 },
   showBarcodeCheckoutBtnFull: { backgroundColor: '#0284C7', padding: 12, borderRadius: 8, alignItems: 'center' },
   showBarcodeCheckoutBtnFullText: { color: '#FFF', fontSize: 15, fontWeight: 'bold' },
   actionBtn: { backgroundColor: '#475569', padding: 12, borderRadius: 8, alignItems: 'center' },
@@ -503,7 +571,6 @@ const styles = StyleSheet.create({
   confirmBtnText: { color: '#FFF', fontSize: 16, fontWeight: 'bold' },
   warningText: { fontSize: 13, color: '#DC2626', fontWeight: 'bold', textAlign: 'right', marginTop: 2 },
 
-  // מודאל הצגת ברקוד
   barcodeModalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.85)', justifyContent: 'center', alignItems: 'center', padding: 20 },
   barcodeCard: { backgroundColor: '#FFF', width: '100%', borderRadius: 20, padding: 24, alignItems: 'center', elevation: 5 },
   barcodeModalTitle: { fontSize: 22, fontWeight: 'bold', color: '#1E293B', marginBottom: 4, textAlign: 'center' },

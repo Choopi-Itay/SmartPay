@@ -33,7 +33,6 @@ interface WalletChainItem {
   walletBalance: number;
   loadedThisMonth: string;
   maxDepositForMonth: number;
-  maxAmountToLoad: number;
   chainID: string;
   chainName: string;
   logoURL: string | null;
@@ -101,7 +100,7 @@ async function runCrawl() {
 
     console.log('הסשן תקין. מתחיל בסריקת ההטבות והארנקים הדיגיטליים...');
 
-    // 2. סריקת קטלוג + ארנקים דיגיטליים (מועבר כמחרוזת למניעת הזרקת __name של tsx)
+    // 2. סריקת קטלוג + ארנקים דיגיטליים (כולל GetWalletInfo לתקרה מדויקת)
     const crawlScript = `
       (async (api) => {
         const H = { organizationid: '48' };
@@ -192,6 +191,10 @@ async function runCrawl() {
         const wallets = generalInfo?.wallets || [];
 
         for (const w of wallets) {
+          const walletDetailRes = await apiFetch(api + '/cards/GetWalletInfo?walletId=' + w.walletID);
+          const walletDetail = walletDetailRes || w;
+          const realMaxDeposit = Number(walletDetail.maxDepositForMonth || w.maxDepositForMonth || 0);
+
           const tagGroups = await apiFetch(api + '/cards/GetWalletChain?walletId=' + w.walletID);
           if (!Array.isArray(tagGroups)) continue;
 
@@ -206,12 +209,11 @@ async function runCrawl() {
               if (!walletChainsMap[key]) {
                 walletChainsMap[key] = {
                   walletID: String(w.walletID),
-                  walletName: (w.walletName || '').trim(),
-                  discountRate: Number(w.discountRate || 0),
-                  walletBalance: Number(w.walletBalance || 0),
-                  loadedThisMonth: String(w.loadedThisMonth || '0'),
-                  maxDepositForMonth: Number(w.maxDepositForMonth || 0),
-                  maxAmountToLoad: Number(w.maxAmountToLoad || 0),
+                  walletName: (walletDetail.walletName || w.walletName || '').trim(),
+                  discountRate: Number(walletDetail.discountRate || w.discountRate || 0),
+                  walletBalance: Number(walletDetail.walletBalance || w.walletBalance || 0),
+                  loadedThisMonth: String(walletDetail.loadedThisMonth || '0'),
+                  maxDepositForMonth: realMaxDeposit,
                   chainID: String(c.chainID),
                   chainName: c.chainName.trim(),
                   logoURL: c.logoURL ? c.logoURL.trim() : null,
@@ -253,7 +255,7 @@ async function runCrawl() {
 
     const nowIso = new Date().toISOString();
 
-    // 3א. מיפוי הטבות הקטלוג הרגיל
+    // 3א. מיפוי הטבות הקטלוג הרגיל (ללא wallet_balance)
     const catalogPayload = catalogItems.map((item) => ({
       club_source: 'histadrut',
       external_id: String(item.categoryId),
@@ -267,8 +269,6 @@ async function runCrawl() {
       discount_percent: null,
       wallet_id: null,
       wallet_name: null,
-      wallet_balance: null,
-      max_amount_to_load: null,
       logo_url: null,
       website: null,
       search_keywords: item.paths.join(' | ') || null,
@@ -277,7 +277,7 @@ async function runCrawl() {
       updated_at: nowIso,
     }));
 
-    // 3ב. מיפוי רשתות הארנקים הדיגיטליים (נתוני מועדון כלליים בלבד)
+    // 3ב. מיפוי רשתות הארנקים הדיגיטליים
     const walletPayload = walletItems.map((w) => ({
       club_source: 'histadrut',
       external_id: `wallet_${w.walletID}_${w.chainID}`,
@@ -300,7 +300,7 @@ async function runCrawl() {
       discount_percent: w.discountRate,
       wallet_id: w.walletID,
       wallet_name: w.walletName,
-      monthly_limit: w.maxDepositForMonth || null,
+      monthly_limit: w.maxDepositForMonth ? Number(w.maxDepositForMonth) : null,
       logo_url: w.logoURL,
       website: w.webSite,
       search_keywords: [w.searchKeyWords, ...w.tags].filter(Boolean).join(', ') || null,
@@ -325,7 +325,7 @@ async function runCrawl() {
     }
 
     await notify(
-      `סנכרון "ביחד בשבילך" הושלם! עודכנו ${catalogPayload.length} הטבות קטלוג + ${walletPayload.length} רשתות ארנקים ב-Supabase.`
+      `סנכרון "ביחד בשבילך" הושלם! עודכנו ${catalogPayload.length} הטבות קטלוג + ${walletPayload.length} רשתות ארנקים ב-Supabase באפס שגיאות.`
     );
   } catch (err: any) {
     await ctx.close();

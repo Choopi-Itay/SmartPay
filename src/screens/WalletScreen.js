@@ -60,8 +60,32 @@ export default function WalletScreen({
     setDiscountPct(item.discount !== undefined ? String(item.discount) : '');
     setExpiryDate(item.expiryDate || '');
     setBarcode(item.code || '');
-    setSelectedBrands(item.applicableBrands || []);
+    
+    // המרת מזהי מותג שמורים לשמות תואמים מתוך רשימת המותגים
+    const mappedBrands = (item.applicableBrands || []).map(b => {
+      const found = availableBrands.find(ab => String(ab.id) === String(b) || ab.name === b);
+      return found ? found.name : b;
+    });
+    setSelectedBrands(mappedBrands);
+    
     setModalVisible(true);
+  };
+
+const resolveBrandNames = (rawBrands) => {
+    if (!Array.isArray(rawBrands) || rawBrands.length === 0) return 'כללי / לא מוגדר';
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+    const cleanNames = rawBrands
+      .map(b => {
+        if (!b) return null;
+        const found = availableBrands.find(ab => String(ab.id) === String(b) || ab.name === b);
+        if (found) return found.name;
+        if (uuidRegex.test(String(b))) return null;
+        return String(b);
+      })
+      .filter(Boolean);
+
+    return cleanNames.length > 0 ? [...new Set(cleanNames)].join(', ') : 'כללי';
   };
 
   const handleSave = () => {
@@ -205,8 +229,8 @@ export default function WalletScreen({
                 </Text>
               )}
               {item.applicableBrands && item.applicableBrands.length > 0 && (
-                <Text style={styles.cardDetail}>
-                  <Text style={styles.bold}>רשתות תואמות:</Text> {item.applicableBrands.join(', ')}
+              <Text style={styles.cardDetail}>
+              <Text style={styles.bold}>רשתות תואמות:</Text> {resolveBrandNames(item.applicableBrands)}
                 </Text>
               )}
             </View>
