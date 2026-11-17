@@ -1,38 +1,44 @@
 import { supabase } from '../../supabase';
 
-// 1. שליפת שמות רשתות להשלמה אוטומטית ברשימה הנפתחת (למשל "גולף")
-export async function searchClubChains(query) {
-  const cleanQuery = (query || '').trim();
-  if (cleanQuery.length < 2) return [];
+let cachedClubChains = null;
+
+// 1. שליפת כל שמות הרשתות הפעילות במועדון (עם Cache בזיכרון למניעת טעינות חוזרות)
+export async function fetchAllActiveClubChains(forceRefresh = false) {
+  if (cachedClubChains && !forceRefresh) {
+    return cachedClubChains;
+  }
 
   const { data, error } = await supabase
     .from('club_benefits')
     .select('title')
     .eq('is_active', true)
-    .eq('benefit_type', 'wallet')
-    .ilike('title', `%${cleanQuery}%`)
-    .limit(20);
+    .eq('benefit_type', 'wallet');
 
-  if (error || !data) return [];
+  if (error || !data) {
+    console.log('Error fetching active club chains:', error);
+    return cachedClubChains || [];
+  }
 
-  // הסרת כפילויות (למקרה שרשת מופיעה גם בארנק 25% וגם בארנק 15%)
-  const uniqueNames = [...new Set(data.map((item) => item.title.trim()))];
-  return uniqueNames;
+  cachedClubChains = [
+    ...new Set(data.map((item) => (item.title || '').trim()).filter(Boolean)),
+  ];
+  return cachedClubChains;
 }
 
-// 2. שליפת שיטות תשלום בלבד (ארנקים נטענים עם אחוז הנחה)
+export const searchClubChains = fetchAllActiveClubChains;
+
+// 2. שליפת שיטות תשלום בלבד (ארנקים נטענים עם אחוז הנחה) - בהתאמה מדויקת לרשת שנבחרה
 export async function findWalletPaymentBenefits(merchantQuery) {
   const cleanQuery = (merchantQuery || '').trim();
   if (!cleanQuery) return [];
 
   const { data, error } = await supabase
     .from('club_benefits')
-    .select('id, external_id, club_source, title, discount_percent, wallet_name, monthly_limit, redim_type')
+    .select('id, external_id, club_source, title, discount_percent, wallet_name, monthly_limit, redim_type, search_keywords')
     .eq('is_active', true)
     .eq('benefit_type', 'wallet')
-    .or(`title.ilike.%${cleanQuery}%,search_keywords.ilike.%${cleanQuery}%`)
-    .order('discount_percent', { ascending: false, nullsFirst: false })
-    .limit(15);
+    .ilike('title', `%${cleanQuery}%`)
+    .order('discount_percent', { ascending: false, nullsFirst: false });
 
   if (error || !data) {
     console.log('Error fetching wallet benefits:', error);
@@ -41,26 +47,18 @@ export async function findWalletPaymentBenefits(merchantQuery) {
 
   const lowerQuery = cleanQuery.toLowerCase();
 
-  // מיון חכם: 1. אחוז הנחה גבוה -> 2. התאמה מדויקת לשם החנות -> 3. שם קצר יותר
-  return data.sort((a, b) => {
-    const discDiff = Number(b.discount_percent || 0) - Number(a.discount_percent || 0);
-    if (discDiff !== 0) return discDiff;
+  const exactMatches = data.filter(
+    (item) => (item.title || '').trim().toLowerCase() === lowerQuery
+  );
 
-    const titleA = (a.title || '').trim().toLowerCase();
-    const titleB = (b.title || '').trim().toLowerCase();
-    const exactA = titleA === lowerQuery ? 1 : 0;
-    const exactB = titleB === lowerQuery ? 1 : 0;
-    if (exactA !== exactB) return exactB - exactA;
+  const finalResults = exactMatches.length > 0 ? exactMatches : data;
 
-    const startsA = titleA.startsWith(lowerQuery) ? 1 : 0;
-    const startsB = titleB.startsWith(lowerQuery) ? 1 : 0;
-    if (startsA !== startsB) return startsB - startsA;
-
-    return titleA.length - titleB.length;
-  });
+  return finalResults.sort(
+    (a, b) => Number(b.discount_percent || 0) - Number(a.discount_percent || 0)
+  );
 }
 
-// 3. שליפת מבצעי מוצר וקופונים בלבד (למשל "מצעי פלנל זוגי 100 ₪")
+// 3. שליפת מבצעי מוצר וקופונים בלבד לרשת שנבחרה
 export async function findCatalogPromotions(merchantQuery) {
   const cleanQuery = (merchantQuery || '').trim();
   if (!cleanQuery) return [];
@@ -70,12 +68,18 @@ export async function findCatalogPromotions(merchantQuery) {
     .select('id, external_id, title, supplier_name, short_description, description, terms_of_use, url')
     .eq('is_active', true)
     .eq('benefit_type', 'catalog')
-    .or(`title.ilike.%${cleanQuery}%,supplier_name.ilike.%${cleanQuery}%,search_keywords.ilike.%${cleanQuery}%`)
-    .limit(15);
+    .or(`supplier_name.ilike.%${cleanQuery}%,title.ilike.%${cleanQuery}%`)
+    .limit(25);
 
-  if (error) {
+  if (error || !data) {
     console.log('Error fetching catalog promotions:', error);
     return [];
   }
-  return data || [];
+
+  const lowerQuery = cleanQuery.toLowerCase();
+  const exactSupplierMatches = data.filter(
+    (item) => (item.supplier_name || '').trim().toLowerCase() === lowerQuery
+  );
+
+  return exactSupplierMatches.length > 0 ? exactSupplierMatches : data;
 }

@@ -1,8 +1,28 @@
 import { supabase } from '../../supabase';
 
-/**
- * שליפת מותגים עבור Dropdown / שיוך מותגים בארנק
- */
+const mapWalletRow = (item) => {
+  const brands = item.item_brands
+    ? item.item_brands.map((ib) => ib.brand_id).filter(Boolean)
+    : [];
+
+  const currentBal = parseFloat(item.current_balance ?? 0);
+
+  return {
+    id: item.id,
+    userId: item.user_id, // <-- הוספת שדה זה מאפשר לזהות האם הפריט שייך למשתמש המחובר או שותף איתו
+    name: item.title || '',
+    type: item.item_type,
+    originalAmount: parseFloat(item.original_amount ?? 0),
+    balance: item.item_type === 'CreditCard' ? Infinity : currentBal,
+    discount: 0,
+    expiryDate: item.expiry_date,
+    code: item.barcode_data || '',
+    receiptImageUrl: item.receipt_image_url || null,
+    isLocked: item.is_locked || false,
+    applicableBrands: brands,
+  };
+};
+
 export const fetchBrands = async () => {
   if (!supabase) return [];
   const { data, error } = await supabase
@@ -14,12 +34,9 @@ export const fetchBrands = async () => {
   return data || [];
 };
 
-/**
- * שליפת כל הפריטים בארנק עם התאמה מלאה לסכמה הנקייה ול-UI
- */
 export const fetchWalletItems = async () => {
   if (!supabase) return [];
-  
+
   const { data, error } = await supabase
     .from('wallet_items')
     .select(`
@@ -32,87 +49,18 @@ export const fetchWalletItems = async () => {
       barcode_data,
       is_locked,
       is_active,
-      club_id,
       item_brands (
         brand_id
       )
     `)
-    .eq('is_active', true)
+    .neq('is_active', false)
     .order('expiry_date', { ascending: true, nullsFirst: false });
 
   if (error) throw error;
 
-  return (data || []).map(item => {
-    // חילוץ שמות/מזהי המותגים התואמים לפריט מתוך item_brands
-    const brands = item.item_brands 
-      ? item.item_brands.map(ib => ib.brand_id).filter(Boolean)
-      : [];
-
-    const currentBal = parseFloat(item.current_balance ?? 0);
-
-    return {
-      id: item.id,
-      name: item.title || '',
-      type: item.item_type,
-      originalAmount: parseFloat(item.original_amount ?? 0),
-      balance: item.item_type === 'CreditCard' ? Infinity : currentBal,
-      expiryDate: item.expiry_date,
-      code: item.barcode_data || '',
-      isLocked: item.is_locked || false,
-      clubId: item.club_id || null,
-      applicableBrands: brands,
-    };
-  });
+  return (data || []).map(mapWalletRow);
 };
 
-/**
- * שליפת פריטי ארנק וחוקי מועדון ייעודיים לרשת ספציפית בקופה (למשל 'קסטרו')
- */
-export const fetchCheckoutItemsForBrand = async (brandName) => {
-  if (!supabase) return { items: [], clubRules: [] };
-
-  // 1. שליפת שוברים/זיכויים שמתאימים לרשת ומסודרים לפי FIFO
-  const { data: items, error: itemsError } = await supabase
-    .from('wallet_items')
-    .select(`
-      id,
-      title,
-      item_type,
-      current_balance,
-      original_amount,
-      barcode_data,
-      expiry_date,
-      is_locked,
-      item_brands!inner ( brand_id )
-    `)
-    .eq('is_active', true)
-    .eq('is_locked', false)
-    .gt('current_balance', 0)
-    .order('expiry_date', { ascending: true });
-
-  if (itemsError) throw itemsError;
-
-  // 2. שליפת מועדוני צרכנות והטבות אשראי מתאימות לרשת
-  const { data: clubRules, error: rulesError } = await supabase
-    .from('club_brand_rules')
-    .select(`
-      discount_percentage,
-      stacks_with_sales,
-      priority_order,
-      special_notes,
-      global_clubs ( display_name, club_type )
-    `)
-    .eq('brand_name', brandName)
-    .order('priority_order', { ascending: true });
-
-  if (rulesError) throw rulesError;
-
-  return { items, clubRules };
-};
-
-/**
- * נעילת פריט (כדי שלא ייפתח מחדש בטעות בקופה)
- */
 export const updateItemLockStatus = async (id, isLocked) => {
   if (!supabase) return;
   const { error } = await supabase
@@ -123,22 +71,17 @@ export const updateItemLockStatus = async (id, isLocked) => {
   if (error) console.error('Error updating lock status:', error.message);
 };
 
-/**
- * עדכון יתרה בענן דרך פונקציית ה-RPC המאובטחת או Fallback ישיר
- */
-export const updateItemBalance = async (id, amountToDeduct) => {
+export const updateItemBalance = async (id, amountToDeduct, brandName = null, notes = 'מימוש בקופה') => {
   if (!supabase) return;
-  
-  // ניסיון הרצה ראשון דרך פרוצדורת RPC מאובטחת
-  const { data, error } = await supabase.rpc('deduct_voucher_balance', {
+
+  const { data, error } = await supabase.rpc('deduct_wallet_item_balance', {
     p_item_id: id,
-    p_amount_to_deduct: amountToDeduct,
+    p_amount: amountToDeduct,
+    p_brand_name: brandName,
+    p_notes: notes,
   });
 
   if (error) {
-    console.warn('RPC deduct failed, performing fallback update:', error.message);
-
-    // Fallback: שליפת היתרה הנוכחית ועדכון ישיר בסכמה הנקייה
     const { data: currentItem, error: fetchErr } = await supabase
       .from('wallet_items')
       .select('current_balance')
@@ -148,12 +91,13 @@ export const updateItemBalance = async (id, amountToDeduct) => {
     if (fetchErr) throw fetchErr;
 
     const newBalance = Math.max(0, (currentItem.current_balance || 0) - amountToDeduct);
+
     const { data: updated, error: updateErr } = await supabase
       .from('wallet_items')
       .update({
         current_balance: newBalance,
         is_active: newBalance > 0,
-        updated_at: new Date().toISOString()
+        updated_at: new Date().toISOString(),
       })
       .eq('id', id)
       .select();
@@ -165,9 +109,6 @@ export const updateItemBalance = async (id, amountToDeduct) => {
   return data;
 };
 
-/**
- * מחיקת פריט מהארנק (Soft Delete או Hard Delete)
- */
 export const deleteWalletItemFromDb = async (id) => {
   if (!supabase) return;
   const { error } = await supabase
@@ -179,51 +120,113 @@ export const deleteWalletItemFromDb = async (id) => {
 };
 
 /**
- * שמירת פריט ארנק חדש (זיכוי תרמי/שובר דיגיטלי/כרטיס מועדון) ושיוך מותגים
+ * וידוא שכל המותגים שנבחרו (כולל חדשים שזוהו בסריקה כמו "דלתא") קיימים בטבלת brands ומחזירים UUID תקין
  */
+export const ensureBrandsExist = async (selectedBrands = [], availableBrands = []) => {
+  if (!supabase || !selectedBrands || selectedBrands.length === 0) return [];
+
+  const resolved = [];
+
+  for (const rawName of selectedBrands) {
+    const cleanName = (rawName || '').trim();
+    if (!cleanName) continue;
+
+    const existing = availableBrands.find(
+      (b) => (b.name || '').trim().toLowerCase() === cleanName.toLowerCase()
+    );
+    if (existing && existing.id && existing.id !== existing.name) {
+      resolved.push(existing);
+      continue;
+    }
+
+    // בדיקה אם קיים ב-DB אך טרם נטען מקומית
+    const { data: dbExisting } = await supabase
+      .from('brands')
+      .select('id, name')
+      .ilike('name', cleanName)
+      .limit(1)
+      .maybeSingle();
+
+    if (dbExisting) {
+      resolved.push(dbExisting);
+      continue;
+    }
+
+    // הוספת המותג החדש לטבלת brands
+    const { data: inserted, error: insertErr } = await supabase
+      .from('brands')
+      .insert([{ name: cleanName }])
+      .select('id, name')
+      .single();
+
+    if (!insertErr && inserted) {
+      resolved.push(inserted);
+    }
+  }
+
+  return resolved;
+};
+
 export const saveNewWalletItem = async (payload, selectedBrands = [], availableBrands = []) => {
   if (!supabase) return;
 
-  // 1. חילוץ מזהה המשתמש המחובר (אם קיים בסשן)
   const { data: userData } = await supabase.auth.getUser();
-  const userId = userData?.user?.id || '00000000-0000-0000-0000-000000000000';
+  const authUserId = userData?.user?.id || null;
 
-  // 2. התאמת השדות מנתוני ה-Form לסכמה הנקייה של Supabase
+  const itemType = payload.item_type || payload.type || 'Voucher';
+  const isCreditCard = itemType === 'CreditCard';
+  const initialAmount = isCreditCard ? 0 : Number(payload.original_amount ?? payload.balance ?? 0);
+  const currentBalance = isCreditCard ? 0 : Number(payload.balance ?? payload.current_balance ?? 0);
+
   const dbPayload = {
-    user_id: userId,
-    title: payload.name || payload.title || 'שובר ללא שם',
-    item_type: payload.item_type || payload.type || 'digital_voucher',
-    original_amount: payload.original_amount || payload.balance || 0,
-    current_balance: payload.balance ?? payload.current_balance ?? 0,
-    barcode_data: payload.barcode || payload.barcode_data || '',
+    ...(authUserId ? { user_id: authUserId } : {}),
+    title: payload.name || payload.title || 'פריט ללא שם',
+    item_type: itemType,
+    original_amount: initialAmount,
+    current_balance: currentBalance,
+    barcode_data: payload.barcode || payload.barcode_data || null,
     expiry_date: payload.expiry_date || payload.expiryDate || null,
-    club_id: payload.club_id || null,
     is_locked: payload.is_locked || false,
     is_active: true,
   };
 
-  const { data: itemData, error: itemError } = await supabase
+  let { data: itemData, error: itemError } = await supabase
     .from('wallet_items')
     .insert([dbPayload])
     .select('id')
     .single();
 
+  if (itemError && itemError.code === '23502' && !authUserId) {
+    const retryRes = await supabase
+      .from('wallet_items')
+      .insert([{ ...dbPayload, user_id: '00000000-0000-0000-0000-000000000000' }])
+      .select('id')
+      .single();
+    itemData = retryRes.data;
+    itemError = retryRes.error;
+  }
+
   if (itemError) throw itemError;
 
-  // 3. הוספת שורות לקשר המותגים (item_brands)
+  if (payload.receipt_image_url && itemData?.id) {
+    await supabase
+      .from('wallet_items')
+      .update({ receipt_image_url: payload.receipt_image_url })
+      .eq('id', itemData.id);
+  }
+
   if (selectedBrands.length > 0 && itemData) {
-    const selectedBrandObjects = availableBrands.filter(b => selectedBrands.includes(b.name));
-    
-    // אם לא נמצא מותג קיים בטבלה, שומרים לפי שם המותג/ID
-    const junctionRows = selectedBrandObjects.length > 0
-      ? selectedBrandObjects.map(b => ({ item_id: itemData.id, brand_id: b.id }))
-      : selectedBrands.map(brandName => ({ item_id: itemData.id, brand_id: brandName }));
+    const resolvedBrands = await ensureBrandsExist(selectedBrands, availableBrands);
+    const junctionRows = resolvedBrands.map((b) => ({
+      item_id: itemData.id,
+      brand_id: b.id,
+    }));
 
     if (junctionRows.length > 0) {
       const { error: junctionError } = await supabase
         .from('item_brands')
         .insert(junctionRows);
-        
+
       if (junctionError) console.error('Junction insert error:', junctionError.message);
     }
   }

@@ -6,6 +6,47 @@ export const getDaysUntilExpiry = (expiryDateStr) => {
   return Math.ceil(diffTime / (1000 * 60 * 60 * 24));
 };
 
+// המרת מזהי UUID לשמות מותגים קריאים מתוך availableBrands
+const resolveItemBrands = (rawBrands = [], availableBrands = []) => {
+  return rawBrands
+    .map(b => {
+      if (!b) return null;
+      const found = availableBrands.find(ab => String(ab.id) === String(b) || ab.name === b);
+      return found ? found.name : String(b);
+    })
+    .filter(Boolean);
+};
+
+// איחוד רשומות מועדון שחולקות את אותו ארנק/שובר למניעת ספירה כפולה של תקרת הטעינה (monthly_limit)
+const deduplicateClubWallets = (clubWallets = [], cleanInput = '') => {
+  if (!Array.isArray(clubWallets) || clubWallets.length === 0) return [];
+
+  const sortedByExactMatch = [...clubWallets].sort((a, b) => {
+    const aExact = (a.title || '').trim().toLowerCase() === cleanInput ? 1 : 0;
+    const bExact = (b.title || '').trim().toLowerCase() === cleanInput ? 1 : 0;
+    if (bExact !== aExact) return bExact - aExact;
+    return Number(b.discount_percent || 0) - Number(a.discount_percent || 0);
+  });
+
+  const grouped = new Map();
+
+  for (const club of sortedByExactMatch) {
+    const sourceKey = (club.club_source || 'histadrut').trim().toLowerCase();
+    const walletKey = (club.wallet_name || club.title || String(club.id)).trim().toLowerCase();
+    const compositeKey = `${sourceKey}::${walletKey}`;
+
+    if (!grouped.has(compositeKey)) {
+      grouped.set(compositeKey, { ...club });
+    }
+  }
+
+  return Array.from(grouped.values()).sort(
+    (a, b) => Number(b.discount_percent || 0) - Number(a.discount_percent || 0)
+  );
+};
+
+const BALANCE_ITEM_TYPES = ['Voucher', 'GiftCard', 'StoreCredit'];
+
 const buildSingleStrategy = ({
   id,
   label,
@@ -14,6 +55,7 @@ const buildSingleStrategy = ({
   numAmount,
   cleanInput,
   clubWallets,
+  availableBrands = [],
   useExistingVouchers = true,
   useClubWallets = true,
 }) => {
@@ -23,19 +65,18 @@ const buildSingleStrategy = ({
 
   const validVouchers = useExistingVouchers
     ? walletState.filter(item => {
-        if ((item.type !== 'Voucher' && item.type !== 'GiftCard') || item.balance <= 0 || item.isLocked) {
+        if (!BALANCE_ITEM_TYPES.includes(item.type) || item.balance <= 0 || item.isLocked) {
           return false;
         }
 
-        const brands = item.applicableBrands || [];
-        const isGeneral = brands.includes('כללי');
+        const resolvedBrands = resolveItemBrands(item.applicableBrands || [], availableBrands);
+        const isGeneral = resolvedBrands.includes('כללי');
 
         if (!isGeneral) {
-          if (brands.length === 0 || !cleanInput) return false;
-          const inputWords = cleanInput.split(/\s+/);
-          const isMatch = brands.some(b => {
+          if (resolvedBrands.length === 0 || !cleanInput) return false;
+          const isMatch = resolvedBrands.some(b => {
             const cleanBrand = (b || '').trim().toLowerCase();
-            return cleanInput === cleanBrand || inputWords.includes(cleanBrand);
+            return cleanInput === cleanBrand;
           });
           if (!isMatch) return false;
         }
@@ -44,42 +85,58 @@ const buildSingleStrategy = ({
       })
     : [];
 
-  const expiringVouchers = [];
+  const expiringItems = [];
+  const storeCredits = [];
   const brandVouchers = [];
   const generalVouchers = [];
 
   for (const v of validVouchers) {
     const days = getDaysUntilExpiry(v.expiryDate);
-    const isGeneral = (v.applicableBrands || []).includes('כללי');
-    if (days <= 30) expiringVouchers.push(v);
-    else if (!isGeneral) brandVouchers.push(v);
-    else generalVouchers.push(v);
+    const resolvedBrands = resolveItemBrands(v.applicableBrands || [], availableBrands);
+    const isGeneral = resolvedBrands.includes('כללי');
+
+    if (days <= 30) {
+      expiringItems.push(v);
+    } else if (v.type === 'StoreCredit') {
+      storeCredits.push(v);
+    } else if (!isGeneral) {
+      brandVouchers.push(v);
+    } else {
+      generalVouchers.push(v);
+    }
   }
 
+  const sortByExpiryThenBalance = (a, b) => {
+    const expDiff = getDaysUntilExpiry(a.expiryDate) - getDaysUntilExpiry(b.expiryDate);
+    if (expDiff !== 0) return expDiff;
+    return a.balance - b.balance;
+  };
+
   const sortByDiscountAndExpiry = (a, b) => {
-    if (b.discount !== a.discount) return b.discount - a.discount;
+    if ((b.discount || 0) !== (a.discount || 0)) return (b.discount || 0) - (a.discount || 0);
     return getDaysUntilExpiry(a.expiryDate) - getDaysUntilExpiry(b.expiryDate);
   };
 
-  expiringVouchers.sort((a, b) => getDaysUntilExpiry(a.expiryDate) - getDaysUntilExpiry(b.expiryDate));
+  expiringItems.sort(sortByExpiryThenBalance);
+  storeCredits.sort(sortByExpiryThenBalance);
   brandVouchers.sort(sortByDiscountAndExpiry);
   generalVouchers.sort(sortByDiscountAndExpiry);
 
-  const applyVoucherList = (list) => {
-    for (const voucher of list) {
+  const applyBalanceItemList = (list) => {
+    for (const item of list) {
       if (remaining <= 0) break;
-      const useAmount = Math.min(remaining, voucher.balance);
-      const savings = useAmount * ((voucher.discount || 0) / 100);
+      const useAmount = Math.min(remaining, item.balance);
+      const savings = useAmount * ((item.discount || 0) / 100);
 
       plan.push({
-        id: voucher.id,
-        name: voucher.name,
+        id: item.id,
+        name: item.name,
         amount: useAmount,
         savings: savings,
-        type: 'Voucher',
-        code: voucher.code,
-        daysLeft: getDaysUntilExpiry(voucher.expiryDate),
-        action: 'סרוק ברקוד בקופה',
+        type: item.type,
+        code: item.code,
+        daysLeft: getDaysUntilExpiry(item.expiryDate),
+        action: item.type === 'StoreCredit' ? 'ממש זיכוי בקופה' : 'סרוק ברקוד בקופה',
       });
 
       totalSavings += savings;
@@ -87,13 +144,20 @@ const buildSingleStrategy = ({
     }
   };
 
-  // 1. שוברים שפגים בקרוב + שוברים ייעודיים לרשת
-  applyVoucherList(expiringVouchers);
-  applyVoucherList(brandVouchers);
+  // 1. פריטים שפגים תוך 30 יום
+  applyBalanceItemList(expiringItems);
 
-  // 2. ארנקי מועדון (מוגבלים לפי תקרת הטעינה החודשית - monthly_limit)
-  if (useClubWallets && remaining > 0 && Array.isArray(clubWallets) && clubWallets.length > 0) {
-    for (const club of clubWallets) {
+  // 2. זיכויים מחנות
+  applyBalanceItemList(storeCredits);
+
+  // 3. שוברים וגיפט-קארדים ייעודיים לרשת
+  applyBalanceItemList(brandVouchers);
+
+  // 4. ארנקי מועדון (מאוחדים למניעת ספירה כפולה של תקרת הטעינה החודשית)
+  const uniqueClubWallets = deduplicateClubWallets(clubWallets, cleanInput);
+
+  if (useClubWallets && remaining > 0 && uniqueClubWallets.length > 0) {
+    for (const club of uniqueClubWallets) {
       if (remaining <= 0) break;
       const discountPct = Number(club.discount_percent || 0);
       if (discountPct <= 0) continue;
@@ -126,10 +190,10 @@ const buildSingleStrategy = ({
     }
   }
 
-  // 3. שוברים כלליים
-  applyVoucherList(generalVouchers);
+  // 5. שוברים כלליים
+  applyBalanceItemList(generalVouchers);
 
-  // 4. השלמת יתרה בכרטיס אשראי
+  // 6. השלמת יתרה בכרטיס אשראי
   if (remaining > 0) {
     const activeCards = walletState
       .filter(item => item.type === 'CreditCard' && !item.isLocked)
@@ -162,7 +226,13 @@ const buildSingleStrategy = ({
   };
 };
 
-export const runOptimization = (walletState, targetAmountStr, currentStore, clubWallets = []) => {
+export const runOptimization = (
+  walletState,
+  targetAmountStr,
+  currentStore,
+  clubWallets = [],
+  availableBrands = []
+) => {
   const numAmount = parseFloat((targetAmountStr || '').toString().trim());
   if (isNaN(numAmount) || numAmount <= 0) return null;
 
@@ -171,32 +241,34 @@ export const runOptimization = (walletState, targetAmountStr, currentStore, club
   const primaryStrategy = buildSingleStrategy({
     id: 'optimal',
     label: '⚡ מסלול מומלץ',
-    subtitle: 'מקסימום חיסכון כולל מועדון ויתרות קיימות',
+    subtitle: 'ניצול זיכויים, שוברים והנחות מועדון',
     walletState,
     numAmount,
     cleanInput,
     clubWallets,
+    availableBrands,
     useExistingVouchers: true,
     useClubWallets: true,
   });
 
   const strategies = [primaryStrategy];
-  const usedVouchers = primaryStrategy.plan.some(p => p.type === 'Voucher');
+  const usedBalanceItems = primaryStrategy.plan.some(p => BALANCE_ITEM_TYPES.includes(p.type));
   const usedClub = primaryStrategy.plan.some(p => p.type === 'ClubWallet');
   const hasActiveWalletAlternative = walletState.some(
     item => !item.isLocked && (item.type === 'CreditCard' || item.balance > 0)
   );
 
-  if (usedVouchers && clubWallets.length > 0) {
+  if (usedBalanceItems && clubWallets.length > 0) {
     strategies.push(
       buildSingleStrategy({
         id: 'club_only',
-        label: '🛡️ שמור שוברים',
-        subtitle: 'משאיר שוברים בארנק ומשתמש רק בהנחת מועדון',
+        label: '🛡️ שמור זיכויים/שוברים',
+        subtitle: 'משאיר יתרות בארנק ומשתמש רק בהנחת מועדון',
         walletState,
         numAmount,
         cleanInput,
         clubWallets,
+        availableBrands,
         useExistingVouchers: false,
         useClubWallets: true,
       })
@@ -206,11 +278,12 @@ export const runOptimization = (walletState, targetAmountStr, currentStore, club
       buildSingleStrategy({
         id: 'direct_wallet',
         label: '💳 ללא טעינת מועדון',
-        subtitle: 'תשלום ישיר באשראי / שוברים קיימים בלבד',
+        subtitle: 'תשלום ישיר באשראי / יתרות קיימות בלבד',
         walletState,
         numAmount,
         cleanInput,
         clubWallets: [],
+        availableBrands,
         useExistingVouchers: true,
         useClubWallets: false,
       })

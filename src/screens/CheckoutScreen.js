@@ -1,39 +1,52 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { 
   StyleSheet, Text, View, TouchableOpacity, TextInput, ScrollView, 
   Alert, Keyboard, Modal, ActivityIndicator, Linking 
 } from 'react-native';
 import { runOptimization, getDaysUntilExpiry } from '../utils/optimizer';
 import { 
-  searchClubChains, 
+  fetchAllActiveClubChains,
   findWalletPaymentBenefits, 
   findCatalogPromotions 
 } from '../services/clubBenefits';
+
+const BALANCE_ITEM_TYPES = ['Voucher', 'GiftCard', 'StoreCredit'];
 
 export default function CheckoutScreen({ 
   userWallet, availableBrands, hasHistadrut = true, onToggleLock, onConfirmPurchase 
 }) {
   const [storeName, setStoreName] = useState('');
+  const [selectedExactStore, setSelectedExactStore] = useState(null);
   const [amount, setAmount] = useState('');
   const [recommendation, setRecommendation] = useState(null);
   const [selectedStrategyIndex, setSelectedStrategyIndex] = useState(0);
   const [showDropdown, setShowDropdown] = useState(false);
 
-  // רשתות להשלמה אוטומטית מהמועדון
-  const [clubChainSuggestions, setClubChainSuggestions] = useState([]);
-
-  // הפרדה בין שיטות תשלום (ארנקים) לבין מבצעי מוצר (קטלוג)
+  const [allClubChains, setAllClubChains] = useState([]);
   const [walletBenefits, setWalletBenefits] = useState([]);
   const [excludedClubIds, setExcludedClubIds] = useState([]);
   const [catalogPromotions, setCatalogPromotions] = useState([]);
   const [showPromotions, setShowPromotions] = useState(false);
   const [loadingClubData, setLoadingClubData] = useState(false);
 
-  // סטייט למודאל ברקוד במחשבון הקופה
   const [barcodeModalVisible, setBarcodeModalVisible] = useState(false);
   const [selectedItemForBarcode, setSelectedItemForBarcode] = useState(null);
 
-  // המרת מזהי UUID / קודים לשמות מותגים קריאים מתוך availableBrands
+  useEffect(() => {
+    let isMounted = true;
+    if (!hasHistadrut) {
+      setAllClubChains([]);
+      return;
+    }
+    fetchAllActiveClubChains().then((chains) => {
+      if (isMounted) setAllClubChains(chains);
+    });
+    return () => {
+      isMounted = false;
+    };
+  }, [hasHistadrut]);
+
+  // המרת המותגים המסומנים של הפריט (מזהי UUID או שמות) לשמות קריאים
   const resolveBrandNames = (rawBrands) => {
     if (!Array.isArray(rawBrands) || rawBrands.length === 0) return 'כללי / לא מוגדר';
     const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -51,74 +64,116 @@ export default function CheckoutScreen({
     return cleanNames.length > 0 ? [...new Set(cleanNames)].join(', ') : 'כללי';
   };
 
+  // בניית רשימת החנויות הרלוונטיות מתוך המותגים המסומנים בארנק או הטבות המועדון
+  const relevantStores = useMemo(() => {
+    const storeMap = new Map();
+
+    for (const item of userWallet) {
+      if (
+        !BALANCE_ITEM_TYPES.includes(item.type) ||
+        Number(item.balance || 0) <= 0 ||
+        item.isLocked ||
+        getDaysUntilExpiry(item.expiryDate) <= 0
+      ) {
+        continue;
+      }
+
+      const rawBrands = item.applicableBrands || [];
+      for (const b of rawBrands) {
+        if (!b) continue;
+        const found = availableBrands.find(ab => String(ab.id) === String(b) || ab.name === b);
+        const brandName = (found ? found.name : String(b)).trim();
+        if (!brandName || brandName === 'כללי') continue;
+
+        const key = brandName.toLowerCase();
+        const existing = storeMap.get(key) || {
+          name: brandName,
+          walletBalance: 0,
+          hasClub: false,
+        };
+        existing.walletBalance += Number(item.balance || 0);
+        storeMap.set(key, existing);
+      }
+    }
+
+    if (hasHistadrut) {
+      for (const chainName of allClubChains) {
+        const cleanName = (chainName || '').trim();
+        if (!cleanName) continue;
+        const key = cleanName.toLowerCase();
+        const existing = storeMap.get(key) || {
+          name: cleanName,
+          walletBalance: 0,
+          hasClub: false,
+        };
+        existing.hasClub = true;
+        storeMap.set(key, existing);
+      }
+    }
+
+    return Array.from(storeMap.values()).sort((a, b) => {
+      if (b.walletBalance !== a.walletBalance) return b.walletBalance - a.walletBalance;
+      return a.name.localeCompare(b.name, 'he');
+    });
+  }, [userWallet, availableBrands, hasHistadrut, allClubChains]);
+
+  const filteredDropdownStores = useMemo(() => {
+    const q = storeName.trim().toLowerCase();
+    if (!q) return relevantStores;
+    return relevantStores.filter((s) => s.name.toLowerCase().includes(q));
+  }, [relevantStores, storeName]);
+
   const getActiveClubWallets = (walletsList = walletBenefits, excludedList = excludedClubIds) => {
     if (!hasHistadrut) return [];
     return walletsList.filter(b => !excludedList.includes(`club_${b.id}`));
   };
 
   useEffect(() => {
-    if (recommendation && storeName && amount && parseFloat(amount) > 0) {
-      const res = runOptimization(userWallet, amount, storeName, getActiveClubWallets());
+    const activeStore = selectedExactStore || storeName.trim();
+    if (recommendation && activeStore && amount && parseFloat(amount) > 0) {
+      const clubsToUse = selectedExactStore ? getActiveClubWallets() : [];
+      const res = runOptimization(userWallet, amount, activeStore, clubsToUse, availableBrands);
       setRecommendation(res);
       setSelectedStrategyIndex(0);
     }
   }, [userWallet, walletBenefits, hasHistadrut, excludedClubIds]);
 
-  useEffect(() => {
-    const query = storeName.trim();
+  const loadBenefitsForExactStore = async (exactName) => {
     setExcludedClubIds([]);
-
-    if (!hasHistadrut || query.length < 2) {
-      setClubChainSuggestions([]);
+    if (!hasHistadrut || !exactName) {
       setWalletBenefits([]);
       setCatalogPromotions([]);
       setShowPromotions(false);
-      return;
+      return [];
     }
 
-    let isActive = true;
-    const timer = setTimeout(async () => {
-      setLoadingClubData(true);
-      try {
-        const [chains, wallets, promos] = await Promise.all([
-          searchClubChains(query),
-          findWalletPaymentBenefits(query),
-          findCatalogPromotions(query),
-        ]);
-        if (isActive) {
-          setClubChainSuggestions(chains);
-          setWalletBenefits(wallets);
-          setCatalogPromotions(promos);
-        }
-      } catch (err) {
-        console.log('Error loading club data:', err);
-      } finally {
-        if (isActive) setLoadingClubData(false);
-      }
-    }, 300);
+    setLoadingClubData(true);
+    try {
+      const [wallets, promos] = await Promise.all([
+        findWalletPaymentBenefits(exactName),
+        findCatalogPromotions(exactName),
+      ]);
+      setWalletBenefits(wallets);
+      setCatalogPromotions(promos);
+      return wallets;
+    } catch (err) {
+      console.log('Error loading club data:', err);
+      return [];
+    } finally {
+      setLoadingClubData(false);
+    }
+  };
 
-    return () => {
-      isActive = false;
-      clearTimeout(timer);
-    };
-  }, [storeName, hasHistadrut]);
-
-  const localMatching = availableBrands
-    .filter(b => b.name.toLowerCase().includes(storeName.trim().toLowerCase()))
-    .map(b => ({ name: b.name, source: 'local' }));
-
-  const clubOnlyMatching = (hasHistadrut ? clubChainSuggestions : [])
-    .filter(name => !localMatching.some(l => l.name.toLowerCase() === name.toLowerCase()))
-    .map(name => ({ name, source: 'histadrut' }));
-
-  const combinedDropdownBrands = [...localMatching, ...clubOnlyMatching];
-
-  const selectStoreFromDropdown = (brandName) => {
+  const selectStoreFromDropdown = async (brandName) => {
     setStoreName(brandName);
+    setSelectedExactStore(brandName);
     setShowDropdown(false);
     Keyboard.dismiss();
+
+    const wallets = await loadBenefitsForExactStore(brandName);
     if (amount && parseFloat(amount) > 0) {
-      const res = runOptimization(userWallet, amount, brandName, getActiveClubWallets());
+      const activeClubs = hasHistadrut ? wallets : [];
+      const res = runOptimization(userWallet, amount, brandName, activeClubs, availableBrands);
       setRecommendation(res);
       setSelectedStrategyIndex(0);
     }
@@ -127,44 +182,53 @@ export default function CheckoutScreen({
   const calculatePayment = async () => {
     Keyboard.dismiss();
     setShowDropdown(false);
+
     if (!amount || parseFloat(amount) <= 0) {
       Alert.alert('שגיאה', 'נא להזין סכום קנייה תקף');
       return;
     }
-    if (!storeName.trim()) {
-      Alert.alert('שגיאה', 'נא לבחור או להזין שם רשת / חנות');
+
+    const typed = storeName.trim();
+    if (!typed) {
+      Alert.alert('שגיאה', 'נא לבחור חנות מהרשימה או להזין שם חנות');
       return;
     }
 
-    let currentWallets = walletBenefits;
-    if (hasHistadrut) {
-      setLoadingClubData(true);
-      try {
-        const [wallets, promos] = await Promise.all([
-          findWalletPaymentBenefits(storeName),
-          findCatalogPromotions(storeName),
-        ]);
-        currentWallets = wallets;
-        setWalletBenefits(wallets);
-        setCatalogPromotions(promos);
-      } catch (err) {
-        console.log('Error calculating club data:', err);
-      } finally {
-        setLoadingClubData(false);
-      }
-    }
+    const matchedRelevant = relevantStores.find(
+      (s) => s.name.toLowerCase() === typed.toLowerCase()
+    );
 
-    const activeClubs = getActiveClubWallets(currentWallets, excludedClubIds);
-    const res = runOptimization(userWallet, amount, storeName, activeClubs);
-    setRecommendation(res);
-    setSelectedStrategyIndex(0);
+    if (matchedRelevant) {
+      const exactName = matchedRelevant.name;
+      setStoreName(exactName);
+      setSelectedExactStore(exactName);
+      const wallets = await loadBenefitsForExactStore(exactName);
+      const activeClubs = getActiveClubWallets(wallets, excludedClubIds);
+      const res = runOptimization(userWallet, amount, exactName, activeClubs, availableBrands);
+      setRecommendation(res);
+      setSelectedStrategyIndex(0);
+    } else {
+      setSelectedExactStore(null);
+      setWalletBenefits([]);
+      setCatalogPromotions([]);
+      const res = runOptimization(userWallet, amount, typed, [], availableBrands);
+      setRecommendation(res);
+      setSelectedStrategyIndex(0);
+    }
   };
 
   const excludeItemFromPlan = (item) => {
+    const activeStore = selectedExactStore || storeName.trim();
     if (item.type === 'ClubWallet') {
       const nextExcluded = [...excludedClubIds, item.id];
       setExcludedClubIds(nextExcluded);
-      const res = runOptimization(userWallet, amount, storeName, getActiveClubWallets(walletBenefits, nextExcluded));
+      const res = runOptimization(
+        userWallet,
+        amount,
+        activeStore,
+        getActiveClubWallets(walletBenefits, nextExcluded),
+        availableBrands
+      );
       setRecommendation(res);
       setSelectedStrategyIndex(0);
       return;
@@ -172,7 +236,8 @@ export default function CheckoutScreen({
 
     onToggleLock(item.id);
     const updatedWallet = userWallet.map(w => w.id === item.id ? { ...w, isLocked: true } : w);
-    const res = runOptimization(updatedWallet, amount, storeName, getActiveClubWallets());
+    const clubsToUse = selectedExactStore ? getActiveClubWallets() : [];
+    const res = runOptimization(updatedWallet, amount, activeStore, clubsToUse, availableBrands);
     setRecommendation(res);
     setSelectedStrategyIndex(0);
   };
@@ -197,8 +262,23 @@ export default function CheckoutScreen({
     }
   };
 
+  const getItemIcon = (type) => {
+    switch (type) {
+      case 'ClubWallet':
+        return '🏛️';
+      case 'CreditCard':
+        return '💳';
+      case 'StoreCredit':
+        return '🧾';
+      case 'GiftCard':
+        return '🎁';
+      default:
+        return '🎫';
+    }
+  };
+
   return (
-    <ScrollView contentContainerStyle={{ paddingBottom: 40 }} style={{ zIndex: 10 }}>
+    <ScrollView contentContainerStyle={{ paddingBottom: 40 }} style={{ zIndex: 10 }} keyboardShouldPersistTaps="handled">
       <Text style={styles.headerTitle}>💰 מחשבון קופה מהיר</Text>
 
       <View style={styles.walletStatusCard}>
@@ -209,7 +289,7 @@ export default function CheckoutScreen({
           userWallet.map(item => {
             const days = getDaysUntilExpiry(item.expiryDate);
             const brandText = resolveBrandNames(item.applicableBrands);
-            const typeIcon = item.type === 'CreditCard' ? '💳' : item.type === 'GiftCard' ? '🎁' : '🎫';
+            const typeIcon = getItemIcon(item.type);
 
             return (
               <View key={item.id} style={styles.walletRowContainer}>
@@ -219,7 +299,7 @@ export default function CheckoutScreen({
                   </TouchableOpacity>
 
                   <Text style={[styles.walletName, item.isLocked && styles.lockedText]}>
-                    {typeIcon} {item.name} {days < 30 ? `(⚠️ עוד ${days} ימים)` : ''}
+                    {typeIcon} {item.name} {days < 0 ? '(⚠️ פג תוקף)' : days < 30 ? `(⚠️ עוד ${days} ימים)` : ''}
                   </Text>
                   
                   <Text style={[styles.walletBalance, item.isLocked && styles.lockedText]}>
@@ -236,7 +316,7 @@ export default function CheckoutScreen({
       </View>
 
       <View style={[styles.inputCard, { zIndex: 100 }]}>
-        <Text style={styles.label}>רשת / חנות:</Text>
+        <Text style={styles.label}>רשת / חנות (מתוך הרשתות עם יתרה או הטבה):</Text>
         
         <View style={{ position: 'relative', zIndex: 100 }}>
           <TextInput
@@ -245,32 +325,53 @@ export default function CheckoutScreen({
             onFocus={() => setShowDropdown(true)}
             onChangeText={(text) => {
               setStoreName(text);
+              setSelectedExactStore(null);
               setShowDropdown(true);
-              if (amount && parseFloat(amount) > 0) {
-                const res = runOptimization(userWallet, amount, text, getActiveClubWallets());
-                setRecommendation(res);
-                setSelectedStrategyIndex(0);
-              }
             }}
-            placeholder="הקלד שם חנות (לדוגמה: גולף)..."
+            placeholder="בחר רשת מהרשימה או הקלד לסינון..."
           />
 
-          {showDropdown && combinedDropdownBrands.length > 0 && (
+          {showDropdown && (
             <View style={styles.dropdownContainer}>
-              <ScrollView nestedScrollEnabled={true} style={{ maxHeight: 180 }}>
-                {combinedDropdownBrands.map((brand, idx) => (
+              {filteredDropdownStores.length > 0 ? (
+                <ScrollView nestedScrollEnabled={true} style={{ maxHeight: 220 }} keyboardShouldPersistTaps="handled">
+                  {filteredDropdownStores.map((store) => (
+                    <TouchableOpacity
+                      key={store.name}
+                      style={styles.dropdownRow}
+                      onPress={() => selectStoreFromDropdown(store.name)}
+                    >
+                      <View style={styles.dropdownBadgesRow}>
+                        {store.walletBalance > 0 && (
+                          <View style={styles.walletBadge}>
+                            <Text style={styles.walletBadgeText}>
+                              🧾 ₪{store.walletBalance.toFixed(0)} בארנק
+                            </Text>
+                          </View>
+                        )}
+                        {store.hasClub && (
+                          <View style={styles.clubMiniBadge}>
+                            <Text style={styles.clubMiniBadgeText}>🏛️ מועדון</Text>
+                          </View>
+                        )}
+                      </View>
+                      <Text style={styles.dropdownText}>{store.name}</Text>
+                    </TouchableOpacity>
+                  ))}
+                </ScrollView>
+              ) : (
+                <View style={styles.emptyDropdownBox}>
+                  <Text style={styles.emptyDropdownText}>
+                    אין זיכויים או הטבות מועדון לרשת זו
+                  </Text>
                   <TouchableOpacity
-                    key={`${brand.name}_${idx}`}
-                    style={styles.dropdownRow}
-                    onPress={() => selectStoreFromDropdown(brand.name)}
+                    style={styles.closeDropdownLink}
+                    onPress={() => setShowDropdown(false)}
                   >
-                    <Text style={styles.dropdownText}>
-                      {brand.source === 'histadrut' ? '🏛️ ' : '🏷️ '}
-                      {brand.name}
-                    </Text>
+                    <Text style={styles.closeDropdownLinkText}>סגור רשימה והמשך לתשלום כללי</Text>
                   </TouchableOpacity>
-                ))}
-              </ScrollView>
+                </View>
+              )}
             </View>
           )}
         </View>
@@ -281,8 +382,10 @@ export default function CheckoutScreen({
           value={amount}
           onChangeText={(text) => {
             setAmount(text);
-            if (storeName) {
-              const res = runOptimization(userWallet, text, storeName, getActiveClubWallets());
+            const activeStore = selectedExactStore || storeName.trim();
+            if (activeStore && parseFloat(text) > 0) {
+              const clubsToUse = selectedExactStore ? getActiveClubWallets() : [];
+              const res = runOptimization(userWallet, text, activeStore, clubsToUse, availableBrands);
               setRecommendation(res);
               setSelectedStrategyIndex(0);
             }
@@ -296,8 +399,7 @@ export default function CheckoutScreen({
         </TouchableOpacity>
       </View>
 
-      {/* תצוגה מקדימה של ארנקי מועדון לפני הזנת סכום */}
-      {hasHistadrut && !activeStrategy && (loadingClubData || walletBenefits.length > 0) && (
+      {hasHistadrut && selectedExactStore && !activeStrategy && (loadingClubData || walletBenefits.length > 0) && (
         <View style={styles.clubCard}>
           <View style={styles.clubHeaderRow}>
             <Text style={styles.clubCardTitle}>🏛️ ארנק "ביחד בשבילך" זמין לרשת זו</Text>
@@ -317,16 +419,24 @@ export default function CheckoutScreen({
         </View>
       )}
 
-      {/* תוכנית התשלום עם בחירת מסלולים */}
       {activeStrategy && (
         <View style={styles.resultCard}>
-          <Text style={styles.resultTitle}>🎯 תוכנית תשלום עבור {storeName}:</Text>
+          <Text style={styles.resultTitle}>🎯 תוכנית תשלום עבור {selectedExactStore || storeName}:</Text>
 
-          {/* בורר מסלולים חלופיים (מופיע כשיש בחירה בין ניצול שוברים לשמירתם) */}
-          {recommendation?.strategies?.length > 1 && (
+          {!selectedExactStore && (
+            <Text style={styles.noBrandNote}>
+              ℹ️ אין זיכויים ייעודיים או הטבות מועדון לרשת זו — מחושב לפי תווים כלליים / אשראי
+            </Text>
+          )}
+
+          {recommendation?.strategies?.length > 1 ? (
             <View style={styles.strategyTabsRow}>
               {recommendation.strategies.map((strat, idx) => {
                 const isSelected = idx === selectedStrategyIndex;
+                const stratFinal = Math.max(
+                  0,
+                  (parseFloat(amount) || 0) - Number(strat.totalSavings || 0)
+                );
                 return (
                   <TouchableOpacity
                     key={strat.id}
@@ -336,22 +446,30 @@ export default function CheckoutScreen({
                     <Text style={[styles.strategyTabTitle, isSelected && styles.activeStrategyTabText]}>
                       {strat.label}
                     </Text>
-                    <Text style={[styles.strategyTabSub, isSelected && styles.activeStrategyTabText]}>
-                      חיסכון ₪{strat.totalSavings.toFixed(0)}
+                    <Text style={[styles.strategyTabFinal, isSelected && styles.activeStrategyTabText]}>
+                      סופי ₪{stratFinal.toFixed(0)}
+                    </Text>
+                    <Text style={[styles.strategyTabSub, isSelected && styles.activeStrategyTabSubText]}>
+                      חיסכון ₪{strat.totalSavings.toFixed(0)} ({strat.effectiveDiscount}%)
                     </Text>
                   </TouchableOpacity>
                 );
               })}
+            </View>
+          ) : (
+            <View style={styles.singleSummaryRow}>
+              <Text style={styles.finalHeader}>
+                סופי לתשלום: ₪{Math.max(0, (parseFloat(amount) || 0) - Number(activeStrategy.totalSavings || 0)).toFixed(2)}
+              </Text>
+              <Text style={styles.savingsHeader}>
+                חיסכון: ₪{activeStrategy.totalSavings.toFixed(2)} ({activeStrategy.effectiveDiscount}%)
+              </Text>
             </View>
           )}
 
           {activeStrategy.subtitle ? (
             <Text style={styles.strategySubtitle}>{activeStrategy.subtitle}</Text>
           ) : null}
-
-          <Text style={styles.savingsHeader}>
-            חיסכון כולל: ₪{activeStrategy.totalSavings.toFixed(2)} ({activeStrategy.effectiveDiscount}%)
-          </Text>
 
           {activeStrategy.plan.length === 0 ? (
             <Text style={{ textAlign: 'center', color: '#64748B', marginVertical: 10 }}>לא נמצאו שוברים או כרטיסים תקפים לרשת זו</Text>
@@ -363,8 +481,7 @@ export default function CheckoutScreen({
               >
                 <View style={styles.planItemHeader}>
                   <Text style={styles.planName}>
-                    {item.type === 'ClubWallet' ? '🏛️ ' : item.type === 'CreditCard' ? '💳 ' : '🎫 '}
-                    {item.name}
+                    {getItemIcon(item.type)} {item.name}
                   </Text>
                   <TouchableOpacity style={styles.excludeBtn} onPress={() => excludeItemFromPlan(item)}>
                     <Text style={styles.excludeBtnText}>🚫 אל תשתמש</Text>
@@ -379,13 +496,19 @@ export default function CheckoutScreen({
                 <Text style={styles.planSavings}>חיסכון: ₪{item.savings.toFixed(2)}</Text>
 
                 <View style={{ marginTop: 10 }}>
-                  {item.type === 'Voucher' ? (
-                    <TouchableOpacity 
-                      style={styles.showBarcodeCheckoutBtnFull}
-                      onPress={() => openBarcodeModalForItem(item)}
-                    >
-                      <Text style={styles.showBarcodeCheckoutBtnFullText}>🔍 הצג ברקוד לקופה</Text>
-                    </TouchableOpacity>
+                  {['Voucher', 'GiftCard', 'StoreCredit'].includes(item.type) ? (
+                    item.code ? (
+                      <TouchableOpacity 
+                        style={styles.showBarcodeCheckoutBtnFull} 
+                        onPress={() => openBarcodeModalForItem(item)}
+                      >
+                        <Text style={styles.showBarcodeCheckoutBtnFullText}>🔍 הצג ברקוד / קוד לקופה</Text>
+                      </TouchableOpacity>
+                    ) : (
+                      <View style={styles.clubActionBox}>
+                        <Text style={styles.clubActionTitle}>🧾 זיכוי מחנות ללא ברקוד — הזדהה בקופה</Text>
+                      </View>
+                    )
                   ) : item.type === 'ClubWallet' ? (
                     <View style={styles.clubActionBox}>
                       <Text style={styles.clubActionTitle}>
@@ -398,7 +521,7 @@ export default function CheckoutScreen({
                     </View>
                   ) : (
                     <TouchableOpacity 
-                      style={styles.actionBtn}
+                      style={styles.actionBtn} 
                       onPress={() => {
                         Keyboard.dismiss();
                         Alert.alert('Google / Apple Pay', `הפעלת NFC עבור ${item.name}`);
@@ -420,8 +543,7 @@ export default function CheckoutScreen({
         </View>
       )}
 
-      {/* אזור נפרד למבצעי מוצר וקופונים של הרשת */}
-      {hasHistadrut && catalogPromotions.length > 0 && (
+      {hasHistadrut && selectedExactStore && catalogPromotions.length > 0 && (
         <View style={styles.promoSection}>
           <TouchableOpacity 
             style={styles.promoHeaderBtn}
@@ -451,7 +573,6 @@ export default function CheckoutScreen({
         </View>
       )}
 
-      {/* מודאל הצגת ברקוד לקופה */}
       <Modal
         visible={barcodeModalVisible}
         animationType="fade"
@@ -518,8 +639,17 @@ const styles = StyleSheet.create({
   label: { fontSize: 15, fontWeight: '600', color: '#334155', marginBottom: 6, textAlign: 'right' },
   input: { borderWidth: 1, borderColor: '#CBD5E1', borderRadius: 8, padding: 10, fontSize: 16, marginBottom: 14, textAlign: 'right' },
   dropdownContainer: { position: 'absolute', top: 50, left: 0, right: 0, backgroundColor: '#FFF', borderWidth: 1, borderColor: '#CBD5E1', borderRadius: 8, elevation: 5, zIndex: 999, overflow: 'hidden' },
-  dropdownRow: { padding: 12, borderBottomWidth: 1, borderBottomColor: '#F1F5F9' },
-  dropdownText: { fontSize: 15, color: '#0F172A', textAlign: 'right' },
+  dropdownRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: 12, borderBottomWidth: 1, borderBottomColor: '#F1F5F9' },
+  dropdownText: { fontSize: 15, fontWeight: '600', color: '#0F172A', textAlign: 'right' },
+  dropdownBadgesRow: { flexDirection: 'row', gap: 6 },
+  walletBadge: { backgroundColor: '#DCFCE7', paddingHorizontal: 8, paddingVertical: 3, borderRadius: 6 },
+  walletBadgeText: { fontSize: 11, fontWeight: 'bold', color: '#166534' },
+  clubMiniBadge: { backgroundColor: '#E0F2FE', paddingHorizontal: 8, paddingVertical: 3, borderRadius: 6 },
+  clubMiniBadgeText: { fontSize: 11, fontWeight: 'bold', color: '#0369A1' },
+  emptyDropdownBox: { padding: 14, alignItems: 'center' },
+  emptyDropdownText: { fontSize: 13, color: '#64748B', textAlign: 'center', marginBottom: 6 },
+  closeDropdownLink: { paddingVertical: 4, paddingHorizontal: 10, backgroundColor: '#F1F5F9', borderRadius: 6 },
+  closeDropdownLinkText: { fontSize: 12, fontWeight: 'bold', color: '#0284C7' },
   calcButton: { backgroundColor: '#16A34A', padding: 16, borderRadius: 10, alignItems: 'center' },
   calcButtonText: { color: '#FFF', fontSize: 18, fontWeight: 'bold' },
 
@@ -544,14 +674,19 @@ const styles = StyleSheet.create({
 
   resultCard: { marginTop: 20, backgroundColor: '#EFF6FF', padding: 20, borderRadius: 16, borderWidth: 1, borderColor: '#BFDBFE' },
   resultTitle: { fontSize: 20, fontWeight: 'bold', color: '#1E40AF', textAlign: 'right' },
+  noBrandNote: { fontSize: 12, color: '#475569', textAlign: 'right', marginTop: 4 },
   strategyTabsRow: { flexDirection: 'row-reverse', gap: 8, marginTop: 12, marginBottom: 6 },
   strategyTab: { flex: 1, backgroundColor: '#FFF', padding: 10, borderRadius: 10, borderWidth: 1, borderColor: '#93C5FD', alignItems: 'center' },
   activeStrategyTab: { backgroundColor: '#1E40AF', borderColor: '#1E40AF' },
   strategyTabTitle: { fontSize: 12, fontWeight: 'bold', color: '#1E40AF', textAlign: 'center' },
-  strategyTabSub: { fontSize: 11, color: '#475569', marginTop: 2 },
+  strategyTabFinal: { fontSize: 15, fontWeight: 'bold', color: '#0F172A', marginTop: 4, textAlign: 'center' },
+  strategyTabSub: { fontSize: 11, fontWeight: '600', color: '#15803D', marginTop: 2, textAlign: 'center' },
   activeStrategyTabText: { color: '#FFF' },
+  activeStrategyTabSubText: { color: '#DCFCE7' },
   strategySubtitle: { fontSize: 12, color: '#475569', textAlign: 'right', marginTop: 4 },
-  savingsHeader: { fontSize: 18, fontWeight: 'bold', color: '#16A34A', textAlign: 'right', marginVertical: 8 },
+  singleSummaryRow: { marginVertical: 8, alignItems: 'flex-end' },
+  finalHeader: { fontSize: 20, fontWeight: 'bold', color: '#0F172A', textAlign: 'right' },
+  savingsHeader: { fontSize: 15, fontWeight: 'bold', color: '#16A34A', textAlign: 'right', marginTop: 2 },
   planItem: { backgroundColor: '#FFF', padding: 14, borderRadius: 10, marginVertical: 8, borderWidth: 1, borderColor: '#E2E8F0' },
   clubPlanItem: { borderColor: '#38BDF8', backgroundColor: '#F8FAFC' },
   planItemHeader: { flexDirection: 'row-reverse', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 },
