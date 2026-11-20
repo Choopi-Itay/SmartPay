@@ -27,6 +27,7 @@ import {
   fetchItemShares,
   removeSingleItemShare,
 } from '../services/shareService';
+import { reportMissingClub } from '../services/feedbackService';
 
 function getExpiryStatus(expiryDate) {
   if (!expiryDate || typeof expiryDate !== 'string') return null;
@@ -105,6 +106,12 @@ export default function WalletScreen({
   const [itemToShare, setItemToShare] = useState(null);
   const [singleShareEmail, setSingleShareEmail] = useState('');
   const [itemSharesList, setItemSharesList] = useState([]);
+
+  // מצב דיווח על מועדון חסר
+  const [missingClubModalVisible, setMissingClubModalVisible] = useState(false);
+  const [missingClubName, setMissingClubName] = useState('');
+  const [missingClubNotes, setMissingClubNotes] = useState('');
+  const [reportingClub, setReportingClub] = useState(false);
 
   const [name, setName] = useState('');
   const [itemType, setItemType] = useState('Voucher');
@@ -194,6 +201,32 @@ export default function WalletScreen({
       setItemSharesList(updated);
     } catch (err) {
       Alert.alert('שגיאה', 'לא ניתן להסיר שיתוף');
+    }
+  };
+
+  const handleReportMissingClub = async () => {
+    if (!missingClubName.trim()) {
+      Alert.alert('שגיאה', 'נא להזין את שם המועדון החסר');
+      return;
+    }
+
+    setReportingClub(true);
+    try {
+      await reportMissingClub({
+        clubName: missingClubName,
+        notes: missingClubNotes,
+      });
+      setMissingClubName('');
+      setMissingClubNotes('');
+      setMissingClubModalVisible(false);
+      Alert.alert(
+        'תודה על הדיווח! 🙌',
+        'המועדון נשמר אצלנו ונפעל להוסיף אותו למערכת בהקדם.'
+      );
+    } catch (err) {
+      Alert.alert('שגיאה', err?.message || 'לא ניתן היה לשלוח את הדיווח');
+    } finally {
+      setReportingClub(false);
     }
   };
 
@@ -716,6 +749,18 @@ export default function WalletScreen({
             thumbColor={hasHistadrut ? '#0284C7' : '#F1F5F9'}
           />
         </View>
+
+        <TouchableOpacity
+          style={[
+            styles.reportMissingClubBtn,
+            !hasHistadrut && { borderTopColor: '#E2E8F0' },
+          ]}
+          onPress={() => setMissingClubModalVisible(true)}
+        >
+          <Text style={styles.reportMissingClubText}>
+            📣 חסר לך מועדון צרכנות אחר? דווח לנו ונוסיף אותו
+          </Text>
+        </TouchableOpacity>
       </View>
 
       {userWallet.length > 0 && (
@@ -993,7 +1038,7 @@ export default function WalletScreen({
         </View>
       </Modal>
 
-     {/* מודאל שיתוף שובר פרטני */}
+      {/* מודאל שיתוף שובר פרטני */}
       <Modal
         visible={singleShareModalVisible}
         animationType="fade"
@@ -1044,6 +1089,66 @@ export default function WalletScreen({
               onPress={() => setSingleShareModalVisible(false)}
             >
               <Text style={{ color: '#FFF', fontSize: 16, fontWeight: 'bold' }}>סגור</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
+      {/* מודאל דיווח על מועדון חסר */}
+      <Modal
+        visible={missingClubModalVisible}
+        animationType="fade"
+        transparent={true}
+        onRequestClose={() => setMissingClubModalVisible(false)}
+      >
+        <View style={styles.barcodeModalOverlay}>
+          <View style={styles.missingClubCard}>
+            <Text style={styles.missingClubTitle}>📣 דיווח על מועדון חסר</Text>
+            <Text style={styles.missingClubSubtitle}>
+              איזה מועדון צרכנות או ארגון עובדים תרצה שנחבר לאפליקציה?
+            </Text>
+
+            <TextInput
+              style={[styles.input, { width: '100%', marginBottom: 12 }]}
+              placeholder="שם המועדון (למשל: בהצדעה, הייטקזון, אשמורת...)"
+              value={missingClubName}
+              onChangeText={setMissingClubName}
+            />
+
+            <TextInput
+              style={[
+                styles.input,
+                {
+                  width: '100%',
+                  marginBottom: 16,
+                  minHeight: 70,
+                  textAlignVertical: 'top',
+                },
+              ]}
+              placeholder="הערות נוספות / איזה הטבות חשובות לך בו? (אופציונלי)"
+              value={missingClubNotes}
+              onChangeText={setMissingClubNotes}
+              multiline
+            />
+
+            <TouchableOpacity
+              style={styles.missingClubSubmitBtn}
+              onPress={handleReportMissingClub}
+              disabled={reportingClub}
+            >
+              {reportingClub ? (
+                <ActivityIndicator size="small" color="#FFF" />
+              ) : (
+                <Text style={styles.missingClubSubmitText}>שלח דיווח</Text>
+              )}
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={styles.missingClubCancelBtn}
+              onPress={() => setMissingClubModalVisible(false)}
+              disabled={reportingClub}
+            >
+              <Text style={styles.missingClubCancelText}>ביטול</Text>
             </TouchableOpacity>
           </View>
         </View>
@@ -1705,6 +1810,64 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: '#64748B',
     marginTop: 3,
+  },
+  reportMissingClubBtn: {
+    marginTop: 10,
+    paddingTop: 10,
+    borderTopWidth: 1,
+    borderTopColor: '#BAE6FD',
+    alignItems: 'center',
+  },
+  reportMissingClubText: {
+    fontSize: 12,
+    fontWeight: 'bold',
+    color: '#0284C7',
+  },
+  missingClubCard: {
+    backgroundColor: '#FFF',
+    width: '90%',
+    borderRadius: 20,
+    padding: 24,
+    alignItems: 'center',
+    elevation: 5,
+  },
+  missingClubTitle: {
+    fontSize: 20,
+    fontWeight: 'bold',
+    color: '#1E293B',
+    marginBottom: 6,
+    textAlign: 'center',
+  },
+  missingClubSubtitle: {
+    fontSize: 13,
+    color: '#64748B',
+    marginBottom: 16,
+    textAlign: 'center',
+  },
+  missingClubSubmitBtn: {
+    backgroundColor: '#0284C7',
+    width: '100%',
+    paddingVertical: 12,
+    borderRadius: 8,
+    alignItems: 'center',
+    marginBottom: 10,
+  },
+  missingClubSubmitText: {
+    color: '#FFF',
+    fontWeight: 'bold',
+    fontSize: 16,
+  },
+  missingClubCancelBtn: {
+    backgroundColor: '#F1F5F9',
+    width: '100%',
+    paddingVertical: 12,
+    borderRadius: 8,
+    alignItems: 'center',
+  },
+  missingClubCancelText: {
+    color: '#475569',
+    fontWeight: 'bold',
+    fontSize: 15,
   },
 
   filterBar: {

@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { 
   StyleSheet, Text, View, TouchableOpacity, TextInput, ScrollView, 
-  Alert, Keyboard, Modal, ActivityIndicator, Linking 
+  Alert, Keyboard, Modal, ActivityIndicator, Linking, Image 
 } from 'react-native';
 import { runOptimization, getDaysUntilExpiry } from '../utils/optimizer';
 import { 
@@ -31,6 +31,7 @@ export default function CheckoutScreen({
 
   const [barcodeModalVisible, setBarcodeModalVisible] = useState(false);
   const [selectedItemForBarcode, setSelectedItemForBarcode] = useState(null);
+  const [receiptViewerUrl, setReceiptViewerUrl] = useState(null);
 
   useEffect(() => {
     let isMounted = true;
@@ -257,6 +258,9 @@ export default function CheckoutScreen({
     if (fullItem && fullItem.code) {
       setSelectedItemForBarcode(fullItem);
       setBarcodeModalVisible(true);
+    } else if (itemPlan.code) {
+      setSelectedItemForBarcode(itemPlan);
+      setBarcodeModalVisible(true);
     } else {
       Alert.alert('אין ברקוד', 'לפריט זה לא הוגדר קוד או ברקוד במערכת.');
     }
@@ -474,65 +478,84 @@ export default function CheckoutScreen({
           {activeStrategy.plan.length === 0 ? (
             <Text style={{ textAlign: 'center', color: '#64748B', marginVertical: 10 }}>לא נמצאו שוברים או כרטיסים תקפים לרשת זו</Text>
           ) : (
-            activeStrategy.plan.map((item, index) => (
-              <View 
-                key={index} 
-                style={[styles.planItem, item.type === 'ClubWallet' && styles.clubPlanItem]}
-              >
-                <View style={styles.planItemHeader}>
-                  <Text style={styles.planName}>
-                    {getItemIcon(item.type)} {item.name}
-                  </Text>
-                  <TouchableOpacity style={styles.excludeBtn} onPress={() => excludeItemFromPlan(item)}>
-                    <Text style={styles.excludeBtnText}>🚫 אל תשתמש</Text>
-                  </TouchableOpacity>
-                </View>
+            activeStrategy.plan.map((item, index) => {
+              const fullWalletItem = userWallet.find((w) => w.id === item.id);
+              const barcodeCode = item.code || fullWalletItem?.code;
+              const receiptUrl = item.receiptImageUrl || fullWalletItem?.receiptImageUrl;
 
-                {item.daysLeft !== undefined && item.daysLeft < 30 && (
-                  <Text style={styles.warningText}>⚠️ תו זה פג בעוד {item.daysLeft} ימים!</Text>
-                )}
-
-                <Text style={styles.planAmount}>סכום לכיסוי בקופה: ₪{item.amount.toFixed(2)}</Text>
-                <Text style={styles.planSavings}>חיסכון: ₪{item.savings.toFixed(2)}</Text>
-
-                <View style={{ marginTop: 10 }}>
-                  {['Voucher', 'GiftCard', 'StoreCredit'].includes(item.type) ? (
-                    item.code ? (
-                      <TouchableOpacity 
-                        style={styles.showBarcodeCheckoutBtnFull} 
-                        onPress={() => openBarcodeModalForItem(item)}
-                      >
-                        <Text style={styles.showBarcodeCheckoutBtnFullText}>🔍 הצג ברקוד / קוד לקופה</Text>
-                      </TouchableOpacity>
-                    ) : (
-                      <View style={styles.clubActionBox}>
-                        <Text style={styles.clubActionTitle}>🧾 זיכוי מחנות ללא ברקוד — הזדהה בקופה</Text>
-                      </View>
-                    )
-                  ) : item.type === 'ClubWallet' ? (
-                    <View style={styles.clubActionBox}>
-                      <Text style={styles.clubActionTitle}>
-                        💳 טען ₪{item.amount.toFixed(2)} בארנק ({item.discountPercent}% הנחה)
-                      </Text>
-                      <Text style={styles.clubActionSub}>
-                        תשלום בפועל בכרטיס: ₪{item.actualPay.toFixed(2)}
-                        {item.redimType ? ` • ${item.redimType}` : ''}
-                      </Text>
-                    </View>
-                  ) : (
-                    <TouchableOpacity 
-                      style={styles.actionBtn} 
-                      onPress={() => {
-                        Keyboard.dismiss();
-                        Alert.alert('Google / Apple Pay', `הפעלת NFC עבור ${item.name}`);
-                      }}
-                    >
-                      <Text style={styles.actionBtnText}>💳 שלם ב-NFC / אשראי</Text>
+              return (
+                <View 
+                  key={index} 
+                  style={[styles.planItem, item.type === 'ClubWallet' && styles.clubPlanItem]}
+                >
+                  <View style={styles.planItemHeader}>
+                    <Text style={styles.planName}>
+                      {getItemIcon(item.type)} {item.name}
+                    </Text>
+                    <TouchableOpacity style={styles.excludeBtn} onPress={() => excludeItemFromPlan(item)}>
+                      <Text style={styles.excludeBtnText}>🚫 אל תשתמש</Text>
                     </TouchableOpacity>
+                  </View>
+
+                  {item.daysLeft !== undefined && item.daysLeft < 30 && (
+                    <Text style={styles.warningText}>⚠️ תו זה פג בעוד {item.daysLeft} ימים!</Text>
                   )}
+
+                  <Text style={styles.planAmount}>סכום לכיסוי בקופה: ₪{item.amount.toFixed(2)}</Text>
+                  <Text style={styles.planSavings}>חיסכון: ₪{item.savings.toFixed(2)}</Text>
+
+                  <View style={{ marginTop: 10, gap: 8 }}>
+                    {['Voucher', 'GiftCard', 'StoreCredit'].includes(item.type) ? (
+                      <>
+                        {barcodeCode ? (
+                          <TouchableOpacity 
+                            style={styles.showBarcodeCheckoutBtnFull} 
+                            onPress={() => openBarcodeModalForItem(item)}
+                          >
+                            <Text style={styles.showBarcodeCheckoutBtnFullText}>🔍 הצג ברקוד / קוד לקופה</Text>
+                          </TouchableOpacity>
+                        ) : null}
+
+                        {receiptUrl ? (
+                          <TouchableOpacity 
+                            style={styles.showReceiptCheckoutBtnFull} 
+                            onPress={() => setReceiptViewerUrl(receiptUrl)}
+                          >
+                            <Text style={styles.showReceiptCheckoutBtnFullText}>🧾 הצג צילום זיכוי פיזי לקופה</Text>
+                          </TouchableOpacity>
+                        ) : null}
+
+                        {!barcodeCode && !receiptUrl ? (
+                          <View style={styles.clubActionBox}>
+                            <Text style={styles.clubActionTitle}>🧾 זיכוי מחנות ללא ברקוד — הזדהה בקופה</Text>
+                          </View>
+                        ) : null}
+                      </>
+                    ) : item.type === 'ClubWallet' ? (
+                      <View style={styles.clubActionBox}>
+                        <Text style={styles.clubActionTitle}>
+                          💳 טען ₪{item.amount.toFixed(2)} בארנק ({item.discountPercent}% הנחה)
+                        </Text>
+                        <Text style={styles.clubActionSub}>
+                          תשלום בפועל בכרטיס: ₪{item.actualPay.toFixed(2)}
+                          {item.redimType ? ` • ${item.redimType}` : ''}
+                        </Text>
+                      </View>
+                    ) : (
+                      <TouchableOpacity 
+                        style={styles.actionBtn} 
+                        onPress={() => {
+                          Keyboard.dismiss();
+                          Alert.alert('Google / Apple Pay', `הפעלת NFC עבור ${item.name}`);
+                        }}
+                      >
+                        <Text style={styles.actionBtnText}>💳 שלם ב-NFC / אשראי</Text>
+                      </TouchableOpacity>
+                    )}
+                  </View>
                 </View>
-              </View>
-            ))
+              );
+            })
           )}
 
           {activeStrategy.plan.length > 0 && (
@@ -573,6 +596,7 @@ export default function CheckoutScreen({
         </View>
       )}
 
+      {/* מודאל הצגת ברקוד */}
       <Modal
         visible={barcodeModalVisible}
         animationType="fade"
@@ -617,6 +641,30 @@ export default function CheckoutScreen({
               <Text style={styles.closeBarcodeButtonText}>סגור חלון</Text>
             </TouchableOpacity>
           </View>
+        </View>
+      </Modal>
+
+      {/* מודאל הצגת צילום זיכוי פיזי במסך מלא */}
+      <Modal
+        visible={Boolean(receiptViewerUrl)}
+        transparent={true}
+        animationType="fade"
+        onRequestClose={() => setReceiptViewerUrl(null)}
+      >
+        <View style={styles.receiptViewerOverlay}>
+          {receiptViewerUrl ? (
+            <Image
+              source={{ uri: receiptViewerUrl }}
+              style={styles.receiptViewerImage}
+              resizeMode="contain"
+            />
+          ) : null}
+          <TouchableOpacity
+            style={styles.closeReceiptViewerBtn}
+            onPress={() => setReceiptViewerUrl(null)}
+          >
+            <Text style={styles.closeReceiptViewerText}>סגור תמונה</Text>
+          </TouchableOpacity>
         </View>
       </Modal>
     </ScrollView>
@@ -700,6 +748,8 @@ const styles = StyleSheet.create({
   clubActionSub: { fontSize: 13, color: '#0F172A', textAlign: 'right', marginTop: 3 },
   showBarcodeCheckoutBtnFull: { backgroundColor: '#0284C7', padding: 12, borderRadius: 8, alignItems: 'center' },
   showBarcodeCheckoutBtnFullText: { color: '#FFF', fontSize: 15, fontWeight: 'bold' },
+  showReceiptCheckoutBtnFull: { backgroundColor: '#FEF3C7', padding: 12, borderRadius: 8, alignItems: 'center', borderWidth: 1, borderColor: '#F59E0B' },
+  showReceiptCheckoutBtnFullText: { color: '#92400E', fontSize: 15, fontWeight: 'bold' },
   actionBtn: { backgroundColor: '#475569', padding: 12, borderRadius: 8, alignItems: 'center' },
   actionBtnText: { color: '#FFF', fontSize: 15, fontWeight: 'bold' },
   confirmBtn: { backgroundColor: '#0F172A', padding: 16, borderRadius: 10, alignItems: 'center', marginTop: 16 },
@@ -717,4 +767,9 @@ const styles = StyleSheet.create({
   barcodeBalanceText: { fontSize: 16, fontWeight: '600', color: '#0284C7', marginBottom: 20 },
   closeBarcodeButton: { backgroundColor: '#334155', paddingVertical: 12, paddingHorizontal: 30, borderRadius: 10, width: '100%', alignItems: 'center' },
   closeBarcodeButtonText: { color: '#FFF', fontSize: 16, fontWeight: 'bold' },
+
+  receiptViewerOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.9)', justifyContent: 'center', alignItems: 'center', padding: 16 },
+  receiptViewerImage: { width: '100%', height: '78%', borderRadius: 12 },
+  closeReceiptViewerBtn: { backgroundColor: '#FFF', paddingVertical: 12, paddingHorizontal: 30, borderRadius: 10, marginTop: 16 },
+  closeReceiptViewerText: { color: '#0F172A', fontWeight: 'bold', fontSize: 16 },
 });

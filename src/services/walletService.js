@@ -9,7 +9,7 @@ const mapWalletRow = (item) => {
 
   return {
     id: item.id,
-    userId: item.user_id, // <-- הוספת שדה זה מאפשר לזהות האם הפריט שייך למשתמש המחובר או שותף איתו
+    userId: item.user_id,
     name: item.title || '',
     type: item.item_type,
     originalAmount: parseFloat(item.original_amount ?? 0),
@@ -41,12 +41,14 @@ export const fetchWalletItems = async () => {
     .from('wallet_items')
     .select(`
       id,
+      user_id,
       title,
       item_type,
       original_amount,
       current_balance,
       expiry_date,
       barcode_data,
+      receipt_image_url,
       is_locked,
       is_active,
       item_brands (
@@ -186,6 +188,7 @@ export const saveNewWalletItem = async (payload, selectedBrands = [], availableB
     current_balance: currentBalance,
     barcode_data: payload.barcode || payload.barcode_data || null,
     expiry_date: payload.expiry_date || payload.expiryDate || null,
+    receipt_image_url: payload.receipt_image_url || payload.receiptImageUrl || null,
     is_locked: payload.is_locked || false,
     is_active: true,
   };
@@ -207,13 +210,6 @@ export const saveNewWalletItem = async (payload, selectedBrands = [], availableB
   }
 
   if (itemError) throw itemError;
-
-  if (payload.receipt_image_url && itemData?.id) {
-    await supabase
-      .from('wallet_items')
-      .update({ receipt_image_url: payload.receipt_image_url })
-      .eq('id', itemData.id);
-  }
 
   if (selectedBrands.length > 0 && itemData) {
     const resolvedBrands = await ensureBrandsExist(selectedBrands, availableBrands);
