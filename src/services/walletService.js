@@ -83,31 +83,7 @@ export const updateItemBalance = async (id, amountToDeduct, brandName = null, no
     p_notes: notes,
   });
 
-  if (error) {
-    const { data: currentItem, error: fetchErr } = await supabase
-      .from('wallet_items')
-      .select('current_balance')
-      .eq('id', id)
-      .single();
-
-    if (fetchErr) throw fetchErr;
-
-    const newBalance = Math.max(0, (currentItem.current_balance || 0) - amountToDeduct);
-
-    const { data: updated, error: updateErr } = await supabase
-      .from('wallet_items')
-      .update({
-        current_balance: newBalance,
-        is_active: newBalance > 0,
-        updated_at: new Date().toISOString(),
-      })
-      .eq('id', id)
-      .select();
-
-    if (updateErr) throw updateErr;
-    return updated;
-  }
-
+  if (error) throw error;
   return data;
 };
 
