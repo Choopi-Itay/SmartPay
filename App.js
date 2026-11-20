@@ -179,18 +179,28 @@ export default function App() {
   const handleConfirmPurchase = async (recommendation) => {
     if (!recommendation) return;
 
+    const failedItems = [];
     for (const planItem of recommendation.plan) {
       if (['Voucher', 'GiftCard', 'StoreCredit'].includes(planItem.type)) {
         try {
           await updateItemBalance(planItem.id, planItem.amount, planItem.name);
         } catch (e) {
           console.log('RPC deduct balance sync error:', e);
+          failedItems.push(planItem.name);
         }
       }
     }
 
     await loadWallet();
-    Alert.alert('הצלחה 🎉', 'הקנייה אושרה והיתרות עודכנו בענן!');
+
+    if (failedItems.length > 0) {
+      Alert.alert(
+        'שגיאה בעדכון חלקי ⚠️',
+        `לא ניתן היה לקזז את היתרה עבור: ${failedItems.join(', ')}. בדוק שהפריט אינו נעול או בעל יתרה מספקת.`
+      );
+    } else {
+      Alert.alert('הצלחה 🎉', 'הקנייה אושרה והיתרות עודכנו בענן!');
+    }
   };
 
   const handleAddItem = async (payload, selectedBrands) => {
@@ -216,13 +226,19 @@ export default function App() {
   const handleUpdateItem = async (id, payload, selectedBrands) => {
     setLoading(true);
     try {
+      const existingItem = userWallet.find((w) => w.id === id);
+      const newBal = payload.balance ?? payload.current_balance ?? 0;
+      const preservedOriginal = existingItem
+        ? Math.max(Number(existingItem.originalAmount || 0), Number(newBal))
+        : newBal;
+
       const { error: updateError } = await supabase
         .from('wallet_items')
         .update({
           title: payload.name || payload.title,
           item_type: payload.item_type || payload.type,
-          current_balance: payload.balance ?? payload.current_balance ?? 0,
-          original_amount: payload.original_amount || payload.balance || 0,
+          current_balance: newBal,
+          original_amount: preservedOriginal,
           expiry_date: payload.expiry_date || payload.expiryDate || null,
           barcode_data: payload.barcode || payload.barcode_data || '',
           updated_at: new Date().toISOString(),
