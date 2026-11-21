@@ -6,16 +6,37 @@
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
+    "splash": {
+      "image": "./assets/icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#1E293B"
+    },
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.choopiitay.smartpay",
+      "infoPlist": {
+        "NSFaceIDUsageDescription": "SmartPay משתמשת בזיהוי פנים כדי להגן על השוברים והזיכויים שלך",
+        "NSCameraUsageDescription": "SmartPay צריכה גישה למצלמה כדי לסרוק שוברים, זיכויים וברקודים",
+        "NSPhotoLibraryUsageDescription": "SmartPay צריכה גישה לגלריה כדי לבחור צילומי שוברים וזיכויים"
+      }
     },
     "android": {
+      "package": "com.choopiitay.smartpay",
+      "versionCode": 1,
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/android-icon-foreground.png",
         "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
-      }
+      },
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.USE_BIOMETRIC",
+        "android.permission.USE_FINGERPRINT",
+        "android.permission.CAMERA",
+        "android.permission.USE_BIOMETRIC",
+        "android.permission.USE_FINGERPRINT"
+      ]
     },
     "web": {
       "favicon": "./assets/favicon.png"
@@ -25,6 +46,12 @@
         "projectId": "39625624-af84-49e1-a5f3-61a987c73659"
       }
     },
-    "owner": "choopiitay"
+    "owner": "choopiitay",
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/39625624-af84-49e1-a5f3-61a987c73659"
+    }
   }
 }

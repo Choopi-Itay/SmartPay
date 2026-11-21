@@ -5,6 +5,8 @@ import {
 } from 'react-native';
 import { runOptimization, getDaysUntilExpiry } from '../utils/optimizer';
 import { 
+  fetchAllGlobalClubs,
+  fetchUserActiveClubKeys,
   fetchAllActiveClubChains,
   findWalletPaymentBenefits, 
   findCatalogPromotions 
@@ -13,7 +15,7 @@ import {
 const BALANCE_ITEM_TYPES = ['Voucher', 'GiftCard', 'StoreCredit'];
 
 export default function CheckoutScreen({ 
-  userWallet, availableBrands, hasHistadrut = true, onToggleLock, onConfirmPurchase 
+  userWallet, availableBrands, clubsVersion = 0, onToggleLock, onConfirmPurchase 
 }) {
   const [storeName, setStoreName] = useState('');
   const [selectedExactStore, setSelectedExactStore] = useState(null);
@@ -22,6 +24,8 @@ export default function CheckoutScreen({
   const [selectedStrategyIndex, setSelectedStrategyIndex] = useState(0);
   const [showDropdown, setShowDropdown] = useState(false);
 
+  const [activeClubKeys, setActiveClubKeys] = useState([]);
+  const [clubsDisplayMap, setClubsDisplayMap] = useState({});
   const [allClubChains, setAllClubChains] = useState([]);
   const [walletBenefits, setWalletBenefits] = useState([]);
   const [excludedClubIds, setExcludedClubIds] = useState([]);
@@ -33,21 +37,39 @@ export default function CheckoutScreen({
   const [selectedItemForBarcode, setSelectedItemForBarcode] = useState(null);
   const [receiptViewerUrl, setReceiptViewerUrl] = useState(null);
 
+  const hasActiveClubs = activeClubKeys.length > 0;
+
   useEffect(() => {
     let isMounted = true;
-    if (!hasHistadrut) {
-      setAllClubChains([]);
-      return;
-    }
-    fetchAllActiveClubChains().then((chains) => {
+    async function loadUserClubContext() {
+      const [allClubs, userKeys] = await Promise.all([
+        fetchAllGlobalClubs(),
+        fetchUserActiveClubKeys(),
+      ]);
+      if (!isMounted) return;
+
+      const map = {};
+      for (const c of allClubs) {
+        map[c.club_key] = c.display_name;
+      }
+      setClubsDisplayMap(map);
+      setActiveClubKeys(userKeys);
+
+      if (userKeys.length === 0) {
+        setAllClubChains([]);
+        return;
+      }
+
+      const chains = await fetchAllActiveClubChains(false, userKeys);
       if (isMounted) setAllClubChains(chains);
-    });
+    }
+
+    loadUserClubContext();
     return () => {
       isMounted = false;
     };
-  }, [hasHistadrut]);
+  }, [clubsVersion, userWallet]);
 
-  // המרת המותגים המסומנים של הפריט (מזהי UUID או שמות) לשמות קריאים
   const resolveBrandNames = (rawBrands) => {
     if (!Array.isArray(rawBrands) || rawBrands.length === 0) return 'כללי / לא מוגדר';
     const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -65,7 +87,6 @@ export default function CheckoutScreen({
     return cleanNames.length > 0 ? [...new Set(cleanNames)].join(', ') : 'כללי';
   };
 
-  // בניית רשימת החנויות הרלוונטיות מתוך המותגים המסומנים בארנק או הטבות המועדון
   const relevantStores = useMemo(() => {
     const storeMap = new Map();
 
@@ -97,7 +118,7 @@ export default function CheckoutScreen({
       }
     }
 
-    if (hasHistadrut) {
+    if (hasActiveClubs) {
       for (const chainName of allClubChains) {
         const cleanName = (chainName || '').trim();
         if (!cleanName) continue;
@@ -116,7 +137,7 @@ export default function CheckoutScreen({
       if (b.walletBalance !== a.walletBalance) return b.walletBalance - a.walletBalance;
       return a.name.localeCompare(b.name, 'he');
     });
-  }, [userWallet, availableBrands, hasHistadrut, allClubChains]);
+  }, [userWallet, availableBrands, hasActiveClubs, allClubChains]);
 
   const filteredDropdownStores = useMemo(() => {
     const q = storeName.trim().toLowerCase();
@@ -125,7 +146,7 @@ export default function CheckoutScreen({
   }, [relevantStores, storeName]);
 
   const getActiveClubWallets = (walletsList = walletBenefits, excludedList = excludedClubIds) => {
-    if (!hasHistadrut) return [];
+    if (!hasActiveClubs) return [];
     return walletsList.filter(b => !excludedList.includes(`club_${b.id}`));
   };
 
@@ -137,11 +158,11 @@ export default function CheckoutScreen({
       setRecommendation(res);
       setSelectedStrategyIndex(0);
     }
-  }, [userWallet, walletBenefits, hasHistadrut, excludedClubIds]);
+  }, [userWallet, walletBenefits, activeClubKeys, excludedClubIds]);
 
   const loadBenefitsForExactStore = async (exactName) => {
     setExcludedClubIds([]);
-    if (!hasHistadrut || !exactName) {
+    if (!hasActiveClubs || !exactName) {
       setWalletBenefits([]);
       setCatalogPromotions([]);
       setShowPromotions(false);
@@ -151,12 +172,17 @@ export default function CheckoutScreen({
     setLoadingClubData(true);
     try {
       const [wallets, promos] = await Promise.all([
-        findWalletPaymentBenefits(exactName),
-        findCatalogPromotions(exactName),
+        findWalletPaymentBenefits(exactName, activeClubKeys),
+        findCatalogPromotions(exactName, activeClubKeys),
       ]);
-      setWalletBenefits(wallets);
+      const enrichedWallets = wallets.map((w) => ({
+        ...w,
+        wallet_name:
+          w.wallet_name || clubsDisplayMap[w.club_source] || w.club_source,
+      }));
+      setWalletBenefits(enrichedWallets);
       setCatalogPromotions(promos);
-      return wallets;
+      return enrichedWallets;
     } catch (err) {
       console.log('Error loading club data:', err);
       return [];
@@ -173,7 +199,7 @@ export default function CheckoutScreen({
 
     const wallets = await loadBenefitsForExactStore(brandName);
     if (amount && parseFloat(amount) > 0) {
-      const activeClubs = hasHistadrut ? wallets : [];
+      const activeClubs = hasActiveClubs ? wallets : [];
       const res = runOptimization(userWallet, amount, brandName, activeClubs, availableBrands);
       setRecommendation(res);
       setSelectedStrategyIndex(0);
@@ -403,10 +429,10 @@ export default function CheckoutScreen({
         </TouchableOpacity>
       </View>
 
-      {hasHistadrut && selectedExactStore && !activeStrategy && (loadingClubData || walletBenefits.length > 0) && (
+      {hasActiveClubs && selectedExactStore && !activeStrategy && (loadingClubData || walletBenefits.length > 0) && (
         <View style={styles.clubCard}>
           <View style={styles.clubHeaderRow}>
-            <Text style={styles.clubCardTitle}>🏛️ ארנק "ביחד בשבילך" זמין לרשת זו</Text>
+            <Text style={styles.clubCardTitle}>🏛️ הטבות מועדונים זמינות לרשת זו</Text>
             {loadingClubData && <ActivityIndicator size="small" color="#0369A1" />}
           </View>
           {!loadingClubData && walletBenefits.map((benefit) => (
@@ -417,7 +443,9 @@ export default function CheckoutScreen({
                   <Text style={styles.discountBadgeText}>{benefit.discount_percent}% הנחה</Text>
                 </View>
               </View>
-              <Text style={styles.clubWalletSub}>{benefit.wallet_name}</Text>
+              <Text style={styles.clubWalletSub}>
+                {clubsDisplayMap[benefit.club_source] || benefit.wallet_name}
+              </Text>
             </View>
           ))}
         </View>
@@ -566,7 +594,7 @@ export default function CheckoutScreen({
         </View>
       )}
 
-      {hasHistadrut && selectedExactStore && catalogPromotions.length > 0 && (
+      {hasActiveClubs && selectedExactStore && catalogPromotions.length > 0 && (
         <View style={styles.promoSection}>
           <TouchableOpacity 
             style={styles.promoHeaderBtn}

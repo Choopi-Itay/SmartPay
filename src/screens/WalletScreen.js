@@ -28,6 +28,13 @@ import {
   removeSingleItemShare,
 } from '../services/shareService';
 import { reportMissingClub } from '../services/feedbackService';
+import {
+  fetchAllGlobalClubs,
+  fetchUserSelectedClubs,
+  setUserClubMembership,
+} from '../services/clubBenefits';
+
+let hasAutoSeededInitialClubs = false;
 
 function getExpiryStatus(expiryDate) {
   if (!expiryDate || typeof expiryDate !== 'string') return null;
@@ -63,10 +70,9 @@ function getExpiryStatus(expiryDate) {
 export default function WalletScreen({
   userWallet,
   availableBrands,
-  hasHistadrut = true,
   currentUser,
   onSignOut,
-  onToggleHistadrut,
+  onClubsChanged,
   onAddItem,
   onUpdateItem,
   onDeleteItem,
@@ -91,6 +97,13 @@ export default function WalletScreen({
   const [permission, requestPermission] = useCameraPermissions();
 
   const [activeFilter, setActiveFilter] = useState('all');
+
+  // מצב מועדוני צרכנות וכרטיסי אשראי דינמיים
+  const [globalClubs, setGlobalClubs] = useState([]);
+  const [selectedClubIds, setSelectedClubIds] = useState([]);
+  const [loadingClubs, setLoadingClubs] = useState(true);
+  const [togglingClubId, setTogglingClubId] = useState(null);
+  const [showAllClubs, setShowAllClubs] = useState(false);
 
   // מצב שיתוף ארנק משפחתי
   const [shareExpanded, setShareExpanded] = useState(false);
@@ -122,6 +135,65 @@ export default function WalletScreen({
   const [selectedBrands, setSelectedBrands] = useState([]);
   const [brandSearch, setBrandSearch] = useState('');
 
+  const loadUserClubs = async () => {
+    setLoadingClubs(true);
+    try {
+      const [clubs, selected] = await Promise.all([
+        fetchAllGlobalClubs(),
+        fetchUserSelectedClubs(),
+      ]);
+      setGlobalClubs(clubs);
+
+      // אם למשתמש אין עדיין שום שיוך ב-DB, מפעיל אוטומטית את המועדונים עם ההטבות הפעילות
+      if (selected.clubIds.length === 0 && !hasAutoSeededInitialClubs && currentUser?.id) {
+        hasAutoSeededInitialClubs = true;
+        const activeByDefault = clubs.filter(
+          (c) => Number(c.synced_items_count || 0) > 0 || c.club_key === 'histadrut'
+        );
+        if (activeByDefault.length > 0) {
+          await Promise.all(
+            activeByDefault.map((c) => setUserClubMembership(c.id, true).catch(() => null))
+          );
+          const seededIds = activeByDefault.map((c) => c.id);
+          setSelectedClubIds(seededIds);
+          if (onClubsChanged) onClubsChanged();
+          return;
+        }
+      }
+
+      setSelectedClubIds(selected.clubIds);
+    } catch (err) {
+      console.log('Error loading user clubs:', err);
+    } finally {
+      setLoadingClubs(false);
+    }
+  };
+
+  const handleToggleClub = async (club) => {
+    if (togglingClubId) return;
+    const isCurrentlySelected = selectedClubIds.includes(club.id);
+    const nextSelected = !isCurrentlySelected;
+
+    // עדכון אופטימי מיידי בממשק
+    setTogglingClubId(club.id);
+    setSelectedClubIds((prev) =>
+      nextSelected ? [...prev, club.id] : prev.filter((id) => id !== club.id)
+    );
+
+    try {
+      await setUserClubMembership(club.id, nextSelected);
+      if (onClubsChanged) onClubsChanged();
+    } catch (err) {
+      // שחזור במקרה של שגיאת רשת/הרשאות
+      setSelectedClubIds((prev) =>
+        isCurrentlySelected ? [...prev, club.id] : prev.filter((id) => id !== club.id)
+      );
+      Alert.alert('שגיאה', err?.message || 'לא ניתן היה לעדכן את שיוך המועדון');
+    } finally {
+      setTogglingClubId(null);
+    }
+  };
+
   const loadShares = async () => {
     const res = await fetchWalletShares();
     setSharesState(res);
@@ -129,7 +201,19 @@ export default function WalletScreen({
 
   useEffect(() => {
     loadShares();
+    loadUserClubs();
   }, [currentUser?.id]);
+
+  const visibleClubsList = useMemo(() => {
+    if (showAllClubs) return globalClubs;
+    const primary = globalClubs.filter(
+      (c) =>
+        Number(c.synced_items_count || 0) > 0 ||
+        c.club_key === 'histadrut' ||
+        selectedClubIds.includes(c.id)
+    );
+    return primary.length > 0 ? primary : globalClubs.slice(0, 6);
+  }, [globalClubs, showAllClubs, selectedClubIds]);
 
   const handleAddShare = async () => {
     if (!shareEmailInput.trim()) {
@@ -221,7 +305,7 @@ export default function WalletScreen({
       setMissingClubModalVisible(false);
       Alert.alert(
         'תודה על הדיווח! 🙌',
-        'המועדון נשמר אצלנו ונפעל להוסיף אותו למערכת בהקדם.'
+        'המועדון נשמר אצלנו ונפעל לחבר את ה-API שלו בהקדם.'
       );
     } catch (err) {
       Alert.alert('שגיאה', err?.message || 'לא ניתן היה לשלוח את הדיווח');
@@ -725,40 +809,82 @@ export default function WalletScreen({
         )}
       </View>
 
-      <View
-        style={[
-          styles.clubMembershipCard,
-          !hasHistadrut && styles.clubMembershipCardInactive,
-        ]}
-      >
-        <View style={styles.clubMembershipRow}>
-          <View style={{ flex: 1, marginRight: 12 }}>
-            <Text style={styles.clubMembershipTitle}>
-              🏛️ מועדון ביחד בשבילך (הסתדרות)
-            </Text>
-            <Text style={styles.clubMembershipSub}>
-              {hasHistadrut
-                ? 'פעיל - ארנקי ההנחה ומבצעי הרשתות מוצגים במחשבון הקופה'
-                : 'כבוי - הפעל אם ברשותך כרטיס מועדון של ההסתדרות'}
+      {/* כרטיס בחירת מועדוני צרכנות וכרטיסי אשראי דינמי */}
+      <View style={styles.clubMembershipCard}>
+        <View style={styles.clubHeaderRow}>
+          <View style={styles.clubCountBadge}>
+            <Text style={styles.clubCountBadgeText}>
+              {selectedClubIds.length} פעילים
             </Text>
           </View>
-          <Switch
-            value={hasHistadrut}
-            onValueChange={onToggleHistadrut}
-            trackColor={{ false: '#CBD5E1', true: '#38BDF8' }}
-            thumbColor={hasHistadrut ? '#0284C7' : '#F1F5F9'}
-          />
+          <View style={{ flex: 1 }}>
+            <Text style={styles.clubMembershipTitle}>
+              🏛️ המועדונים וכרטיסי האשראי שלי
+            </Text>
+            <Text style={styles.clubMembershipSub}>
+              בחר את המועדונים שברשותך — ההטבות ישוקללו אוטומטית במחשבון הקופה
+            </Text>
+          </View>
         </View>
 
+        {loadingClubs ? (
+          <ActivityIndicator size="small" color="#0284C7" style={{ marginVertical: 10 }} />
+        ) : (
+          <>
+            <View style={styles.clubsChipsGrid}>
+              {visibleClubsList.map((club) => {
+                const isSelected = selectedClubIds.includes(club.id);
+                const hasLiveData =
+                  Number(club.synced_items_count || 0) > 0 || club.club_key === 'histadrut';
+
+                return (
+                  <TouchableOpacity
+                    key={club.id}
+                    style={[
+                      styles.clubSelectorChip,
+                      isSelected && styles.clubSelectorChipActive,
+                      !isSelected && !hasLiveData && styles.clubSelectorChipPending,
+                    ]}
+                    onPress={() => handleToggleClub(club)}
+                    disabled={togglingClubId === club.id}
+                  >
+                    <Text
+                      style={[
+                        styles.clubSelectorChipText,
+                        isSelected && styles.clubSelectorChipTextActive,
+                        !isSelected && !hasLiveData && styles.clubSelectorChipTextPending,
+                      ]}
+                    >
+                      {isSelected ? '✓ ' : '+ '}
+                      {club.display_name}
+                      {!hasLiveData && !isSelected ? ' (בקרוב)' : ''}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+
+            {globalClubs.length > visibleClubsList.length || showAllClubs ? (
+              <TouchableOpacity
+                style={styles.expandClubsBtn}
+                onPress={() => setShowAllClubs((prev) => !prev)}
+              >
+                <Text style={styles.expandClubsBtnText}>
+                  {showAllClubs
+                    ? '▲ הצג רק מועדונים זמינים'
+                    : `▼ הצג את כל המועדונים והכרטיסים (${globalClubs.length})`}
+                </Text>
+              </TouchableOpacity>
+            ) : null}
+          </>
+        )}
+
         <TouchableOpacity
-          style={[
-            styles.reportMissingClubBtn,
-            !hasHistadrut && { borderTopColor: '#E2E8F0' },
-          ]}
+          style={styles.reportMissingClubBtn}
           onPress={() => setMissingClubModalVisible(true)}
         >
           <Text style={styles.reportMissingClubText}>
-            📣 חסר לך מועדון צרכנות אחר? דווח לנו ונוסיף אותו
+            📣 חסר לך מועדון צרכנות אחר? דווח לנו ונחבר אותו
           </Text>
         </TouchableOpacity>
       </View>
@@ -1792,24 +1918,80 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#BAE6FD',
   },
-  clubMembershipCardInactive: {
-    backgroundColor: '#F8FAFC',
-    borderColor: '#E2E8F0',
-  },
-  clubMembershipRow: {
+  clubHeaderRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    alignItems: 'center',
+    alignItems: 'flex-start',
+    marginBottom: 10,
+  },
+  clubCountBadge: {
+    backgroundColor: '#0284C7',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 12,
+    marginRight: 8,
+  },
+  clubCountBadgeText: {
+    color: '#FFF',
+    fontSize: 11,
+    fontWeight: 'bold',
   },
   clubMembershipTitle: {
     fontSize: 15,
     fontWeight: 'bold',
     color: '#0F172A',
+    textAlign: 'right',
   },
   clubMembershipSub: {
     fontSize: 12,
+    color: '#475569',
+    marginTop: 2,
+    textAlign: 'right',
+  },
+  clubsChipsGrid: {
+    flexDirection: 'row-reverse',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginTop: 4,
+  },
+  clubSelectorChip: {
+    backgroundColor: '#FFF',
+    borderWidth: 1,
+    borderColor: '#7DD3FC',
+    paddingVertical: 7,
+    paddingHorizontal: 12,
+    borderRadius: 20,
+  },
+  clubSelectorChipActive: {
+    backgroundColor: '#0284C7',
+    borderColor: '#0284C7',
+  },
+  clubSelectorChipPending: {
+    backgroundColor: '#F8FAFC',
+    borderColor: '#CBD5E1',
+  },
+  clubSelectorChipText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#0369A1',
+  },
+  clubSelectorChipTextActive: {
+    color: '#FFF',
+    fontWeight: 'bold',
+  },
+  clubSelectorChipTextPending: {
     color: '#64748B',
-    marginTop: 3,
+    fontWeight: '500',
+  },
+  expandClubsBtn: {
+    marginTop: 10,
+    alignItems: 'center',
+    paddingVertical: 4,
+  },
+  expandClubsBtnText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#0369A1',
   },
   reportMissingClubBtn: {
     marginTop: 10,
