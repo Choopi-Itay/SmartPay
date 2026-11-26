@@ -1,0 +1,33 @@
+name: Sync Pais Nightly
+
+on:
+  schedule:
+    # 02:00 AM IST (שעון חורף) = 00:00 UTC
+    - cron: '0 0 * * *'
+  workflow_dispatch: {}
+
+jobs:
+  sync-pais:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Sync Pais benefits
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          PAIS_TIER: ${{ secrets.PAIS_TIER || 'regular' }}
+          PAIS_COOKIE: ${{ secrets.PAIS_COOKIE }}
+          PAIS_AUTO_DISCOVER: 'true'
+          PAIS_MAX_CATEGORIES: ${{ secrets.PAIS_MAX_CATEGORIES || '350' }}
+        run: node scripts/syncPais.js
