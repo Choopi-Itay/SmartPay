@@ -24,7 +24,7 @@ jobs:
 
       - name: Sync Pais benefits
         env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_URL: ${{ secrets.EXPO_PUBLIC_SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           PAIS_TIER: ${{ secrets.PAIS_TIER || 'regular' }}
           PAIS_COOKIE: ${{ secrets.PAIS_COOKIE }}
