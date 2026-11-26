@@ -2,11 +2,15 @@ import { supabase } from '../../supabase';
 
 let cachedClubChains = null;
 let cachedClubsKey = '';
+let cachedAt = 0;
 let attemptedInitialSeed = false;
+
+const CHAIN_CACHE_TTL_MS = 5 * 60 * 1000; // 5 דקות
 
 export function invalidateClubCache() {
   cachedClubChains = null;
   cachedClubsKey = '';
+  cachedAt = 0;
 }
 
 function normalizeText(value) {
@@ -16,17 +20,16 @@ function normalizeText(value) {
     .trim();
 }
 
-function extractSearchTerms(query) {
-  const clean = String(query || '').trim();
-  if (!clean) return [];
+function canonicalChainName(value) {
+  return normalizeText(value)
+    .replace(/^רשת\s+/i, '')
+    .replace(/\s+(בע"מ|בע״מ|בעמ)\s*$/i, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
 
-  const noParens = normalizeText(clean);
-  const tokens = clean
-    .split(/[\s/|,-]+/)
-    .map((t) => t.replace(/[()]/g, '').trim())
-    .filter((t) => t.length >= 2);
-
-  return [...new Set([clean, noParens, ...tokens].filter(Boolean))];
+function escapePostgrestTerm(term) {
+  return String(term || '').replace(/[%_,]/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
 // 1. שליפת כל המועדונים הפעילים במערכת
@@ -140,65 +143,127 @@ export async function fetchUserActiveClubKeys() {
   return clubKeys;
 }
 
-// 5. שליפת כל שמות הרשתות הזמינות במועדונים שנבחרו (עם דפדוף מלא מעבר ל-1,000 שורות)
-export async function fetchAllActiveClubChains(forceRefresh = false, activeClubKeys = null) {
-  const keysToUse = activeClubKeys !== null ? activeClubKeys : await fetchUserActiveClubKeys();
-  if (!keysToUse || keysToUse.length === 0) return [];
-
-  const cacheSignature = [...keysToUse].sort().join(',');
-  if (cachedClubChains && !forceRefresh && cachedClubsKey === cacheSignature) {
-    return cachedClubChains;
-  }
-
-  const titlesSet = new Set();
-  const pageSize = 1000;
+async function fetchPaginatedColumn(table, column, benefitType, clubKeys, pageSize = 1000) {
+  const values = [];
   let from = 0;
 
   while (true) {
-    const { data, error } = await supabase
-      .from('club_benefits')
-      .select('title')
+    let q = supabase
+      .from(table)
+      .select(column)
       .eq('is_active', true)
-      .eq('benefit_type', 'wallet')
-      .in('club_source', keysToUse)
-      .range(from, from + pageSize - 1);
+      .eq('benefit_type', benefitType)
+      .in('club_source', clubKeys);
 
+    if (benefitType === 'catalog') {
+      q = q.not(column, 'is', null);
+    }
+
+    const { data, error } = await q.range(from, from + pageSize - 1);
     if (error) {
-      console.warn('[clubBenefits] fetchAllActiveClubChains error:', error.message);
+      console.warn(`[clubBenefits] fetchPaginatedColumn (${benefitType}) error:`, error.message);
       break;
     }
     if (!data || data.length === 0) break;
 
     for (const row of data) {
-      const clean = normalizeText(row.title);
-      if (clean) titlesSet.add(clean);
+      if (row[column]) values.push(row[column]);
     }
 
     if (data.length < pageSize) break;
     from += pageSize;
   }
 
+  return values;
+}
+
+// 5. שליפת כל שמות הרשתות הזמינות במועדונים שנבחרו (קריאת RPC מהירה עם גיבוי לדפדוף)
+export async function fetchAllActiveClubChains(forceRefresh = false, activeClubKeys = null) {
+  const keysToUse = activeClubKeys !== null ? activeClubKeys : await fetchUserActiveClubKeys();
+  if (!keysToUse || keysToUse.length === 0) return [];
+
+  const cacheSignature = [...keysToUse].sort().join(',');
+  const isCacheValid =
+    cachedClubChains &&
+    !forceRefresh &&
+    cachedClubsKey === cacheSignature &&
+    Date.now() - cachedAt < CHAIN_CACHE_TTL_MS;
+
+  if (isCacheValid) {
+    return cachedClubChains;
+  }
+
+  const canonicalMap = new Map();
+
+  // ניסיון ראשון: קריאת RPC מהירה בצד השרת (מחזירה שמות ייחודיים בלבד)
+  const { data: rpcData, error: rpcError } = await supabase.rpc('get_active_club_chains', {
+    p_club_keys: keysToUse,
+  });
+
+  if (!rpcError && Array.isArray(rpcData)) {
+    for (const row of rpcData) {
+      const clean = normalizeText(row.chain_name);
+      const canon = canonicalChainName(clean);
+      if (canon && canon !== 'מפעל הפיס') {
+        const key = canon.toLowerCase();
+        if (!canonicalMap.has(key)) {
+          canonicalMap.set(key, canon);
+        }
+      }
+    }
+
+    cachedClubsKey = cacheSignature;
+    cachedClubChains = Array.from(canonicalMap.values());
+    cachedAt = Date.now();
+    return cachedClubChains;
+  }
+
+  // גיבוי: דפדוף מלא אם פונקציית ה-RPC טרם הוגדרה ב-DB
+  const [walletTitles, catalogSuppliers] = await Promise.all([
+    fetchPaginatedColumn('club_benefits', 'title', 'wallet', keysToUse),
+    fetchPaginatedColumn('club_benefits', 'supplier_name', 'catalog', keysToUse),
+  ]);
+
+  for (const rawTitle of walletTitles) {
+    const clean = normalizeText(rawTitle);
+    const canon = canonicalChainName(clean);
+    if (canon) {
+      const key = canon.toLowerCase();
+      if (!canonicalMap.has(key)) {
+        canonicalMap.set(key, clean);
+      }
+    }
+  }
+
+  for (const rawSupplier of catalogSuppliers) {
+    const clean = normalizeText(rawSupplier);
+    const canon = canonicalChainName(clean);
+    if (canon && canon !== 'מפעל הפיס') {
+      const key = canon.toLowerCase();
+      if (!canonicalMap.has(key)) {
+        canonicalMap.set(key, canon);
+      }
+    }
+  }
+
   cachedClubsKey = cacheSignature;
-  cachedClubChains = Array.from(titlesSet);
+  cachedClubChains = Array.from(canonicalMap.values());
+  cachedAt = Date.now();
   return cachedClubChains;
 }
 
 export const searchClubChains = fetchAllActiveClubChains;
 
-// 6. שליפת הטבות ארנק לרשת שנבחרה מתוך המועדונים הפעילים של המשתמש
+// 6. שליפת הטבות ארנק לרשת שנבחרה — התאמה מדויקת/ממוקדת לשם הרשת בלבד
 export async function findWalletPaymentBenefits(merchantQuery, activeClubKeys = null) {
-  const cleanQuery = String(merchantQuery || '').trim();
-  if (!cleanQuery) return [];
+  const cleanQuery = escapePostgrestTerm(merchantQuery);
+  if (!cleanQuery || cleanQuery.length < 2) return [];
 
   const keysToUse = activeClubKeys !== null ? activeClubKeys : await fetchUserActiveClubKeys();
   if (!keysToUse || keysToUse.length === 0) return [];
 
-  const terms = extractSearchTerms(cleanQuery);
-  const orConditions = terms.flatMap((t) => [
-    `title.ilike.%${t}%`,
-    `wallet_name.ilike.%${t}%`,
-    `search_keywords.ilike.%${t}%`,
-  ]);
+  const canonQuery = canonicalChainName(cleanQuery).toLowerCase();
+  const rawLower = normalizeText(cleanQuery).toLowerCase();
 
   const [allClubs, benefitsRes] = await Promise.all([
     fetchAllGlobalClubs(),
@@ -208,7 +273,7 @@ export async function findWalletPaymentBenefits(merchantQuery, activeClubKeys = 
       .eq('is_active', true)
       .eq('benefit_type', 'wallet')
       .in('club_source', keysToUse)
-      .or(orConditions.join(','))
+      .ilike('title', `%${cleanQuery}%`)
       .order('discount_percent', { ascending: false, nullsFirst: false }),
   ]);
 
@@ -217,16 +282,19 @@ export async function findWalletPaymentBenefits(merchantQuery, activeClubKeys = 
     return [];
   }
 
-  const rows = benefitsRes.data || [];
+  const rows = (benefitsRes.data || []).filter((r) => {
+    const itemTitleNorm = normalizeText(r.title).toLowerCase();
+    const itemCanon = canonicalChainName(r.title).toLowerCase();
+    return (
+      itemTitleNorm === rawLower ||
+      itemCanon === canonQuery ||
+      (canonQuery.length >= 3 && (itemCanon.includes(canonQuery) || canonQuery.includes(itemCanon)))
+    );
+  });
+
   const clubNameMap = new Map(allClubs.map((c) => [c.club_key, c.display_name]));
-  const normalizedQuery = normalizeText(cleanQuery).toLowerCase();
 
-  const exactTitleRows = rows.filter(
-    (r) => normalizeText(r.title).toLowerCase() === normalizedQuery
-  );
-  const candidateRows = exactTitleRows.length > 0 ? exactTitleRows : rows;
-
-  return candidateRows
+  return rows
     .map((item) => {
       const clubName = clubNameMap.get(item.club_source) || item.club_source;
       const rawWallet = String(item.wallet_name || '').trim();
@@ -243,29 +311,46 @@ export async function findWalletPaymentBenefits(merchantQuery, activeClubKeys = 
     .sort((a, b) => Number(b.discount_percent || 0) - Number(a.discount_percent || 0));
 }
 
-// 7. שליפת הטבות קטלוג/מבצעים לרשת שנבחרה
+// 7. שליפת הטבות קטלוג/מבצעים לרשת שנבחרה — מאוזנת בין כל המועדונים הפעילים
 export async function findCatalogPromotions(merchantQuery, activeClubKeys = null) {
-  const cleanQuery = String(merchantQuery || '').trim();
-  if (!cleanQuery) return [];
+  const cleanQuery = escapePostgrestTerm(merchantQuery);
+  if (!cleanQuery || cleanQuery.length < 2) return [];
 
   const keysToUse = activeClubKeys !== null ? activeClubKeys : await fetchUserActiveClubKeys();
   if (!keysToUse || keysToUse.length === 0) return [];
 
-  const terms = extractSearchTerms(cleanQuery);
-  const orConditions = terms.flatMap((t) => [
-    `supplier_name.ilike.%${t}%`,
-    `title.ilike.%${t}%`,
-  ]);
+  const canonTerm = escapePostgrestTerm(canonicalChainName(cleanQuery));
+  const searchTerm = canonTerm.length >= 2 ? canonTerm : cleanQuery;
+  const perClubLimit = Math.max(10, Math.ceil(40 / keysToUse.length));
 
-  const { data, error } = await supabase
-    .from('club_benefits')
-    .select('id, external_id, club_source, title, supplier_name, short_description, description, terms_of_use, url')
-    .eq('is_active', true)
-    .eq('benefit_type', 'catalog')
-    .in('club_source', keysToUse)
-    .or(orConditions.join(','))
-    .limit(25);
+  const clubResults = await Promise.all(
+    keysToUse.map(async (clubKey) => {
+      const { data, error } = await supabase
+        .from('club_benefits')
+        .select('id, external_id, club_source, title, supplier_name, short_description, description, terms_of_use, url')
+        .eq('is_active', true)
+        .eq('benefit_type', 'catalog')
+        .eq('club_source', clubKey)
+        .or(
+          `supplier_name.ilike.%${searchTerm}%,title.ilike.%${searchTerm}%,search_keywords.ilike.%${searchTerm}%`
+        )
+        .limit(perClubLimit);
 
-  if (error || !data) return [];
-  return data;
+      if (error || !data) return [];
+      return data;
+    })
+  );
+
+  const seenIds = new Set();
+  const combined = [];
+
+  for (const list of clubResults) {
+    for (const row of list) {
+      if (!row?.id || seenIds.has(row.id)) continue;
+      seenIds.add(row.id);
+      combined.push(row);
+    }
+  }
+
+  return combined;
 }

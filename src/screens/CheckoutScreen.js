@@ -14,6 +14,37 @@ import {
 
 const BALANCE_ITEM_TYPES = ['Voucher', 'GiftCard', 'StoreCredit'];
 
+const CLUB_BADGE_THEMES = {
+  pais: { bg: '#E0F2FE', text: '#0369A1', border: '#BAE6FD' },
+  histadrut: { bg: '#F3E8FF', text: '#6B21A8', border: '#E9D5FF' },
+  buyme: { bg: '#DCFCE7', text: '#166534', border: '#BBF7D0' },
+  default: { bg: '#F1F5F9', text: '#334155', border: '#CBD5E1' },
+};
+
+function extractPromoPricing(promo) {
+  const combined = `${promo.description || ''} | ${promo.short_description || ''} | ${promo.title || ''}`;
+
+  // מזהה תבנית כמו "מחיר מנוי: 59 ₪ במקום 85 ₪" או "59 ₪ במקום 85 ₪"
+  const pairMatch = combined.match(/(\d+(?:\.\d+)?)\s*₪\s*במקום\s*(\d+(?:\.\d+)?)\s*₪/);
+  if (pairMatch) {
+    return {
+      price: Number(pairMatch[1]),
+      originalPrice: Number(pairMatch[2]),
+    };
+  }
+
+  // מזהה מחיר בודד כמו "מחיר מנוי: 59 ₪" או "59 ₪"
+  const singleMatch = combined.match(/(\d+(?:\.\d+)?)\s*₪/);
+  if (singleMatch) {
+    return {
+      price: Number(singleMatch[1]),
+      originalPrice: null,
+    };
+  }
+
+  return { price: null, originalPrice: null };
+}
+
 export default function CheckoutScreen({ 
   userWallet, availableBrands, clubsVersion = 0, onToggleLock, onConfirmPurchase 
 }) {
@@ -30,7 +61,9 @@ export default function CheckoutScreen({
   const [walletBenefits, setWalletBenefits] = useState([]);
   const [excludedClubIds, setExcludedClubIds] = useState([]);
   const [catalogPromotions, setCatalogPromotions] = useState([]);
-  const [showPromotions, setShowPromotions] = useState(false);
+  const [showPromotions, setShowPromotions] = useState(true);
+  const [selectedPromoClub, setSelectedPromoClub] = useState('ALL');
+  const [sortPromosByPrice, setSortPromosByPrice] = useState(true);
   const [loadingClubData, setLoadingClubData] = useState(false);
 
   const [barcodeModalVisible, setBarcodeModalVisible] = useState(false);
@@ -140,10 +173,42 @@ export default function CheckoutScreen({
   }, [userWallet, availableBrands, hasActiveClubs, allClubChains]);
 
   const filteredDropdownStores = useMemo(() => {
-    const q = storeName.trim().toLowerCase();
-    if (!q) return relevantStores;
-    return relevantStores.filter((s) => s.name.toLowerCase().includes(q));
-  }, [relevantStores, storeName]);
+  const q = storeName.trim().toLowerCase();
+  const list = !q
+    ? relevantStores
+    : relevantStores.filter((s) => s.name.toLowerCase().includes(q));
+  return list.slice(0, 60);
+}, [relevantStores, storeName]);
+
+  const promoClubOptions = useMemo(() => {
+    const counts = new Map();
+    for (const p of catalogPromotions) {
+      const key = p.club_source || 'other';
+      counts.set(key, (counts.get(key) || 0) + 1);
+    }
+    return Array.from(counts.entries()).map(([key, count]) => ({
+      key,
+      label: clubsDisplayMap[key] || key,
+      count,
+    }));
+  }, [catalogPromotions, clubsDisplayMap]);
+
+  const displayedPromotions = useMemo(() => {
+    const enriched = catalogPromotions
+      .filter((p) => selectedPromoClub === 'ALL' || p.club_source === selectedPromoClub)
+      .map((p) => ({
+        ...p,
+        _pricing: extractPromoPricing(p),
+      }));
+
+    if (!sortPromosByPrice) return enriched;
+
+    return [...enriched].sort((a, b) => {
+      const pa = a._pricing.price ?? Number.POSITIVE_INFINITY;
+      const pb = b._pricing.price ?? Number.POSITIVE_INFINITY;
+      return pa - pb;
+    });
+  }, [catalogPromotions, selectedPromoClub, sortPromosByPrice]);
 
   const getActiveClubWallets = (walletsList = walletBenefits, excludedList = excludedClubIds) => {
     if (!hasActiveClubs) return [];
@@ -162,10 +227,10 @@ export default function CheckoutScreen({
 
   const loadBenefitsForExactStore = async (exactName) => {
     setExcludedClubIds([]);
+    setSelectedPromoClub('ALL');
     if (!hasActiveClubs || !exactName) {
       setWalletBenefits([]);
       setCatalogPromotions([]);
-      setShowPromotions(false);
       return [];
     }
 
@@ -182,6 +247,9 @@ export default function CheckoutScreen({
       }));
       setWalletBenefits(enrichedWallets);
       setCatalogPromotions(promos);
+      if (promos.length > 0) {
+        setShowPromotions(true);
+      }
       return enrichedWallets;
     } catch (err) {
       console.log('Error loading club data:', err);
@@ -594,7 +662,7 @@ export default function CheckoutScreen({
         </View>
       )}
 
-      {hasActiveClubs && selectedExactStore && catalogPromotions.length > 0 && (
+      {hasActiveClubs && selectedExactStore && (loadingClubData || catalogPromotions.length > 0) && (
         <View style={styles.promoSection}>
           <TouchableOpacity 
             style={styles.promoHeaderBtn}
@@ -604,23 +672,141 @@ export default function CheckoutScreen({
               🎁 מבצעים והטבות מוצר ברשת ({catalogPromotions.length})
             </Text>
             <Text style={styles.promoToggleText}>
-              {showPromotions ? '▲ הסתר' : '▼ הצג מבצעים'}
+              {showPromotions ? '▲ הסתר' : '▼ הצג'}
             </Text>
           </TouchableOpacity>
 
-          {showPromotions && catalogPromotions.map((promo) => (
-            <View key={promo.id} style={styles.promoItemCard}>
-              <Text style={styles.promoItemTitle}>{promo.title}</Text>
-              {promo.short_description ? (
-                <Text style={styles.promoItemDesc}>{promo.short_description}</Text>
-              ) : null}
-              {promo.url ? (
-                <TouchableOpacity onPress={() => Linking.openURL(promo.url)}>
-                  <Text style={styles.promoLink}>לפרטי ההטבה באתר המועדון ↗</Text>
-                </TouchableOpacity>
-              ) : null}
-            </View>
-          ))}
+          {loadingClubData && <ActivityIndicator size="small" color="#B45309" style={{ marginTop: 10 }} />}
+
+          {!loadingClubData && showPromotions && (
+            <>
+              {/* סרגל סינון לפי מועדון ומיון מחיר */}
+              <View style={styles.promoControlsRow}>
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  contentContainerStyle={styles.promoPillsContainer}
+                >
+                  {promoClubOptions.length > 1 && (
+                    <TouchableOpacity
+                      style={[
+                        styles.promoFilterPill,
+                        selectedPromoClub === 'ALL' && styles.promoFilterPillActive,
+                      ]}
+                      onPress={() => setSelectedPromoClub('ALL')}
+                    >
+                      <Text
+                        style={[
+                          styles.promoSortPillText,
+                          sortPromosByPrice && styles.promoSortPillTextActive,
+                        ]}
+                      >
+                        {sortPromosByPrice ? 'מחיר: נמוך ← גבוה' : 'סדר מועדון (לחץ למחיר ↑)'}
+                      </Text>
+                    </TouchableOpacity>
+                  )}
+
+                  {promoClubOptions.map((opt) => {
+                    const isSelected = selectedPromoClub === opt.key;
+                    return (
+                      <TouchableOpacity
+                        key={opt.key}
+                        style={[
+                          styles.promoFilterPill,
+                          isSelected && styles.promoFilterPillActive,
+                        ]}
+                        onPress={() =>
+                          setSelectedPromoClub(isSelected && promoClubOptions.length > 1 ? 'ALL' : opt.key)
+                        }
+                      >
+                        <Text
+                          style={[
+                            styles.promoFilterPillText,
+                            isSelected && styles.promoFilterPillTextActive,
+                          ]}
+                        >
+                          {opt.label} ({opt.count})
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+
+                  <TouchableOpacity
+                    style={[
+                      styles.promoSortPill,
+                      sortPromosByPrice && styles.promoSortPillActive,
+                    ]}
+                    onPress={() => setSortPromosByPrice((prev) => !prev)}
+                  >
+                    <Text
+                      style={[
+                        styles.promoSortPillText,
+                        sortPromosByPrice && styles.promoSortPillTextActive,
+                      ]}
+                    >
+                      {sortPromosByPrice ? '✓ ממוין לפי מחיר ↑' : '⇅ מיין לפי מחיר'}
+                    </Text>
+                  </TouchableOpacity>
+                </ScrollView>
+              </View>
+
+              {displayedPromotions.map((promo) => {
+                const theme = CLUB_BADGE_THEMES[promo.club_source] || CLUB_BADGE_THEMES.default;
+                const { price, originalPrice } = promo._pricing;
+
+                return (
+                  <View key={promo.id} style={styles.promoItemCard}>
+                    <View style={styles.promoCardTopRow}>
+                      <View
+                        style={[
+                          styles.promoClubPill,
+                          { backgroundColor: theme.bg, borderColor: theme.border },
+                        ]}
+                      >
+                        <Text style={[styles.promoClubPillText, { color: theme.text }]}>
+                          🏛️ {clubsDisplayMap[promo.club_source] || promo.club_source}
+                        </Text>
+                      </View>
+
+                      {price !== null && (
+                        <View style={styles.promoPriceTag}>
+                          <Text style={styles.promoPriceMain}>₪{price}</Text>
+                          {originalPrice !== null && originalPrice > price && (
+                            <Text style={styles.promoPriceOrig}>₪{originalPrice}</Text>
+                          )}
+                        </View>
+                      )}
+                    </View>
+
+                    <Text style={styles.promoItemTitle}>{promo.title}</Text>
+
+                    {promo.short_description && promo.short_description !== promo.title ? (
+                      <Text style={styles.promoItemSubDesc}>{promo.short_description}</Text>
+                    ) : null}
+
+                    {promo.description ? (
+                      <Text style={styles.promoItemDesc}>{promo.description}</Text>
+                    ) : null}
+
+                    {promo.terms_of_use ? (
+                      <View style={styles.promoTermsBox}>
+                        <Text style={styles.promoItemTerms}>ℹ️ {promo.terms_of_use}</Text>
+                      </View>
+                    ) : null}
+
+                    {promo.url ? (
+                    <TouchableOpacity
+                      style={styles.promoLinkBtn}
+                      onPress={() => Linking.openURL(promo.url)}
+                    >
+                      <Text style={styles.promoLink}>פתח קטגוריה באתר המועדון ↗</Text>
+                    </TouchableOpacity>
+                  ) : null}
+                  </View>
+                );
+              })}
+            </>
+          )}
         </View>
       )}
 
@@ -739,14 +925,34 @@ const styles = StyleSheet.create({
   discountBadgeText: { color: '#166534', fontWeight: 'bold', fontSize: 13 },
   clubWalletSub: { fontSize: 13, color: '#334155', textAlign: 'right', marginTop: 4 },
 
-  promoSection: { marginTop: 18, backgroundColor: '#FFFBEB', padding: 14, borderRadius: 14, borderWidth: 1, borderColor: '#FDE68A' },
+  promoSection: { marginTop: 18, backgroundColor: '#FFFBEB', padding: 14, borderRadius: 16, borderWidth: 1, borderColor: '#FDE68A' },
   promoHeaderBtn: { flexDirection: 'row-reverse', justifyContent: 'space-between', alignItems: 'center' },
   promoHeaderTitle: { fontSize: 15, fontWeight: 'bold', color: '#92400E' },
   promoToggleText: { fontSize: 13, fontWeight: '600', color: '#B45309' },
-  promoItemCard: { backgroundColor: '#FFF', padding: 12, borderRadius: 10, marginTop: 10, borderWidth: 1, borderColor: '#FEF3C7' },
-  promoItemTitle: { fontSize: 14, fontWeight: 'bold', color: '#1E293B', textAlign: 'right' },
-  promoItemDesc: { fontSize: 12, color: '#475569', textAlign: 'right', marginTop: 4 },
-  promoLink: { fontSize: 12, color: '#0284C7', fontWeight: '600', textAlign: 'right', marginTop: 6 },
+  promoControlsRow: { marginTop: 10, marginBottom: 2 },
+  promoPillsContainer: { flexDirection: 'row-reverse', gap: 6, paddingVertical: 2 },
+  promoFilterPill: { backgroundColor: '#FFF', borderWidth: 1, borderColor: '#FCD34D', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 20 },
+  promoFilterPillActive: { backgroundColor: '#B45309', borderColor: '#B45309' },
+  promoFilterPillText: { fontSize: 12, fontWeight: '600', color: '#92400E' },
+  promoFilterPillTextActive: { color: '#FFF' },
+  promoSortPill: { backgroundColor: '#FEF3C7', borderWidth: 1, borderColor: '#F59E0B', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 20 },
+  promoSortPillActive: { backgroundColor: '#0F172A', borderColor: '#0F172A' },
+  promoSortPillText: { fontSize: 12, fontWeight: '600', color: '#78350F' },
+  promoSortPillTextActive: { color: '#FFF' },
+  promoItemCard: { backgroundColor: '#FFF', padding: 14, borderRadius: 12, marginTop: 10, borderWidth: 1, borderColor: '#FDE68A', shadowColor: '#000', shadowOpacity: 0.04, shadowRadius: 4, shadowOffset: { width: 0, height: 1 }, elevation: 1 },
+  promoCardTopRow: { flexDirection: 'row-reverse', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 },
+  promoClubPill: { paddingHorizontal: 9, paddingVertical: 3, borderRadius: 8, borderWidth: 1 },
+  promoClubPillText: { fontSize: 11, fontWeight: 'bold' },
+  promoPriceTag: { flexDirection: 'row-reverse', alignItems: 'baseline', gap: 6, backgroundColor: '#ECFDF5', paddingHorizontal: 8, paddingVertical: 3, borderRadius: 8 },
+  promoPriceMain: { fontSize: 15, fontWeight: 'bold', color: '#047857' },
+  promoPriceOrig: { fontSize: 12, color: '#94A3B8', textDecorationLine: 'line-through' },
+  promoItemTitle: { fontSize: 14, fontWeight: 'bold', color: '#0F172A', textAlign: 'right', lineHeight: 20 },
+  promoItemSubDesc: { fontSize: 12, color: '#475569', textAlign: 'right', marginTop: 4 },
+  promoItemDesc: { fontSize: 12, color: '#0369A1', fontWeight: '500', textAlign: 'right', marginTop: 4 },
+  promoTermsBox: { backgroundColor: '#F8FAFC', paddingHorizontal: 8, paddingVertical: 5, borderRadius: 6, marginTop: 8 },
+  promoItemTerms: { fontSize: 11, color: '#64748B', textAlign: 'right' },
+  promoLinkBtn: { marginTop: 8, alignSelf: 'flex-start' },
+  promoLink: { fontSize: 12, color: '#0284C7', fontWeight: 'bold' },
 
   resultCard: { marginTop: 20, backgroundColor: '#EFF6FF', padding: 20, borderRadius: 16, borderWidth: 1, borderColor: '#BFDBFE' },
   resultTitle: { fontSize: 20, fontWeight: 'bold', color: '#1E40AF', textAlign: 'right' },
