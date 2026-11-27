@@ -656,7 +656,7 @@ async function syncPais() {
   const seenExternalIds = new Set();
   const syncedChitIds = new Set();
 
-  // 1. תווים נטענים מאוחדים (wallet) מתוך Lobby + cards/get
+  // 1. תווים נטענים מאוחדים (wallet) מתוך Lobby + merchants / cards/get
   let groups = [];
   try {
     groups = await fetchPaisLobby();
@@ -680,45 +680,38 @@ async function syncPais() {
 
     const mappedChitId = group.chit_id ?? GROUP_TO_CHIT[String(group.id)] ?? null;
     let merchants = Array.isArray(group.merchants) ? [...group.merchants] : [];
+    let idForKey = mappedChitId ?? group.id;
 
-    let loadedFromCardsGet = false;
-    try {
-      const chits = await fetchGroupChits(group.id, topupUrl);
-      if (chits.length > 0) {
-        merchants = chits;
-        loadedFromCardsGet = true;
-      } else {
-        console.warn(`⚠️ cards/get החזיר 0 chits עבור קבוצה ${groupName} (${group.id})`);
-      }
-    } catch (err) {
-      console.warn(`⚠️ לא ניתן למשוך chits עבור קבוצה ${groupName} (${group.id}): ${err.message}`);
-    }
-
-    if (!loadedFromCardsGet && mappedChitId) {
+    if (mappedChitId) {
       syncedChitIds.add(Number(mappedChitId));
-      const referer = Number(mappedChitId) === 5002 ? PAIS_RESTAURANTS_PAGE_URL : PAIS_NETWORKS_PAGE_URL;
+      const referer =
+        Number(mappedChitId) === 5002 ? PAIS_RESTAURANTS_PAGE_URL : PAIS_NETWORKS_PAGE_URL;
       try {
         const fetchedMerchants = await fetchChitMerchants(mappedChitId, referer);
         if (fetchedMerchants.length > 0) {
-          const existingNames = new Set(merchants.map((m) => getMerchantDisplayName(m).toLowerCase()));
-          for (const fm of fetchedMerchants) {
-            const fname = getMerchantDisplayName(fm);
-            if (fname && !existingNames.has(fname.toLowerCase())) {
-              merchants.push(fm);
-              existingNames.add(fname.toLowerCase());
-            }
-          }
+          merchants = fetchedMerchants;
         }
       } catch (err) {
         console.warn(
           `⚠️ לא ניתן למשוך רשימה מלאה עבור קבוצה ${groupName} (chit_id=${mappedChitId}): ${err.message}`
         );
       }
+    } else {
+      try {
+        const chits = await fetchGroupChits(group.id, topupUrl);
+        if (chits.length > 0) {
+          merchants = chits;
+          idForKey = `group_${group.id}`;
+        } else {
+          console.warn(`⚠️ cards/get החזיר 0 chits עבור קבוצה ${groupName} (${group.id})`);
+        }
+      } catch (err) {
+        console.warn(`⚠️ לא ניתן למשוך chits עבור קבוצה ${groupName} (${group.id}): ${err.message}`);
+      }
     }
 
     if (FETCH_DELAY_MS > 0) await sleep(FETCH_DELAY_MS);
 
-    const idForKey = loadedFromCardsGet ? `group_${group.id}` : (mappedChitId ?? group.id);
     console.log(
       `  • [Wallet] ${groupName} (${idForKey}): ${discountInfo.discountPercent}% (עד ${discountInfo.monthlyLimit} ₪) | ${merchants.length} בתי עסק`
     );
