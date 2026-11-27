@@ -1,0 +1,35 @@
+name: Sync Hi-Tech Zone Catalog
+
+on:
+  schedule:
+    # הרצה יומית ב-04:00 UTC (06:00 שעון ישראל / 07:00 שעון קיץ)
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+
+jobs:
+  sync-htzone:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Sync Hi-Tech Zone (MCP)
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          HTZ_FETCH_DELAY_MS: ${{ secrets.HTZ_FETCH_DELAY_MS || '250' }}
+          HTZ_MAX_CATEGORIES: ${{ secrets.HTZ_MAX_CATEGORIES || '300' }}
+          HTZ_MAX_PAGES: ${{ secrets.HTZ_MAX_PAGES || '50' }}
+          HTZ_MIN_KEEP_RATIO: ${{ secrets.HTZ_MIN_KEEP_RATIO || '0.7' }}
+        run: node scripts/syncHtzone.js
