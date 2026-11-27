@@ -26,7 +26,7 @@ jobs:
 
       - name: Sync Hi-Tech Zone (MCP)
         env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL || secrets.EXPO_PUBLIC_SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           HTZ_FETCH_DELAY_MS: ${{ secrets.HTZ_FETCH_DELAY_MS || '250' }}
           HTZ_MAX_CATEGORIES: ${{ secrets.HTZ_MAX_CATEGORIES || '300' }}
