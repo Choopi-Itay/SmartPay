@@ -16,10 +16,43 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 
 const PAIS_LOBBY_URL = 'https://paisplus.co.il/cashcards/binding-chit/lobby/get';
+const PAIS_CHIT_MERCHANTS_URL = 'https://paisplus.co.il/cashcards/binding-chit/merchants';
+const PAIS_NETWORKS_PAGE_URL = 'https://paisplus.co.il/cashcards/networks';
+const PAIS_RESTAURANTS_PAGE_URL = 'https://paisplus.co.il/cashcards/restaurants';
+const PAIS_FOOD_CHAINS_PAGE_URL = 'https://paisplus.co.il/cashcards/food-chains';
 const PAIS_SESSION_PAGE_URL = 'https://paisplus.co.il/unified-cash-cards';
 const PAIS_HOME_URL = 'https://paisplus.co.il/';
 const PAIS_BASE_URL = 'https://paisplus.co.il';
 const PAIS_TIER = (process.env.PAIS_TIER || 'regular').toLowerCase() === 'vip' ? 'vip' : 'regular';
+
+const DEFAULT_GROUP_TO_CHIT = {
+  201: 5001,
+  202: 5002,
+};
+
+function parseGroupToChitMap() {
+  const map = { ...DEFAULT_GROUP_TO_CHIT };
+  if (process.env.PAIS_GROUP_CHIT_MAP) {
+    try {
+      const parsed = JSON.parse(process.env.PAIS_GROUP_CHIT_MAP);
+      for (const [k, v] of Object.entries(parsed || {})) {
+        if (v !== null && v !== undefined && String(v).trim() !== '') {
+          map[String(k).trim()] = Number(v);
+        }
+      }
+    } catch (err) {
+      console.warn('⚠️ אזהרה בפענוח PAIS_GROUP_CHIT_MAP:', err.message);
+    }
+  }
+  return map;
+}
+
+const GROUP_TO_CHIT = parseGroupToChitMap();
+
+const EXTRA_CHIT_IDS = String(process.env.PAIS_CHIT_IDS || '')
+  .split(',')
+  .map((id) => Number(String(id || '').trim()))
+  .filter((n) => Number.isFinite(n) && n > 0);
 
 const AUTO_DISCOVER = String(process.env.PAIS_AUTO_DISCOVER ?? 'true').toLowerCase() !== 'false';
 const MAX_CATEGORIES = Math.max(1, Number(process.env.PAIS_MAX_CATEGORIES || 350));
@@ -35,7 +68,6 @@ const DEFAULT_ROOT_CATEGORY_IDS = String(process.env.PAIS_ROOT_CATEGORY_IDS || '
   .map((id) => String(id || '').trim())
   .filter(Boolean);
 
-// שמות קטגוריות כלליות שאינן שם של רשת/בית עסק
 const GENERIC_CATEGORY_NAMES = new Set([
   'מזון',
   'שופינג וצרכנות',
@@ -60,6 +92,7 @@ const GENERIC_CATEGORY_NAMES = new Set([
 ]);
 
 let activeCookieHeader = String(process.env.PAIS_COOKIE || '').trim();
+const manualXsrfToken = String(process.env.PAIS_XSRF_TOKEN || '').trim();
 
 function sleep(ms) {
   if (!ms) return Promise.resolve();
@@ -100,6 +133,7 @@ function mergeCookies(existingCookieStr, setCookieList) {
 }
 
 function extractXsrfFromCookie(cookieHeader) {
+  if (manualXsrfToken) return manualXsrfToken;
   if (!cookieHeader) return '';
   const match = cookieHeader.match(/(?:^|;\s*)XSRF-TOKEN=([^;]+)/);
   if (!match) return '';
@@ -131,7 +165,13 @@ async function initSessionAndDiscoverRoots() {
   const discoveredRoots = new Set(DEFAULT_ROOT_CATEGORY_IDS);
 
   console.log('🌐 מנסה להשיג עוגיות סשן, CSRF וקטגוריות ראשיות מ-paisplus.co.il...');
-  for (const pageUrl of [PAIS_HOME_URL, PAIS_SESSION_PAGE_URL]) {
+  for (const pageUrl of [
+    PAIS_HOME_URL,
+    PAIS_NETWORKS_PAGE_URL,
+    PAIS_RESTAURANTS_PAGE_URL,
+    PAIS_FOOD_CHAINS_PAGE_URL,
+    PAIS_SESSION_PAGE_URL,
+  ]) {
     try {
       const res = await fetch(pageUrl, {
         method: 'GET',
@@ -140,14 +180,15 @@ async function initSessionAndDiscoverRoots() {
           accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
           'accept-language': 'he-IL,he;q=0.9,en-US;q=0.8,en;q=0.7',
           'user-agent':
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/158.0.0.0 Safari/537.36',
+          ...(activeCookieHeader ? { cookie: activeCookieHeader } : {}),
         },
       });
 
       const setCookies = getSetCookieHeaders(res);
       const html = await res.text();
 
-      if (!process.env.PAIS_COOKIE && setCookies.length > 0) {
+      if (setCookies.length > 0) {
         activeCookieHeader = mergeCookies(activeCookieHeader, setCookies);
       }
 
@@ -168,15 +209,16 @@ async function initSessionAndDiscoverRoots() {
   return Array.from(discoveredRoots);
 }
 
-function buildHeaders(referer = PAIS_SESSION_PAGE_URL) {
+function buildHeaders(referer = PAIS_NETWORKS_PAGE_URL) {
   const xsrf = extractXsrfFromCookie(activeCookieHeader);
 
   const headers = {
     accept: 'application/json, text/plain, */*',
     'accept-language': 'he-IL,he;q=0.9,en-US;q=0.8,en;q=0.7',
+    origin: PAIS_BASE_URL,
     referer,
     'user-agent':
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/158.0.0.0 Safari/537.36',
     'x-requested-with': 'XMLHttpRequest',
   };
 
@@ -188,12 +230,32 @@ function buildHeaders(referer = PAIS_SESSION_PAGE_URL) {
 
 function cleanText(raw) {
   return String(raw || '')
+    .replace(/<br\s*\/?>/gi, ' | ')
     .replace(/<[^>]*>/g, ' ')
     .replace(/&nbsp;/gi, ' ')
     .replace(/&quot;/gi, '"')
     .replace(/&amp;/gi, '&')
+    .replace(/\s*\|\s*\|\s*/g, ' | ')
     .replace(/\s+/g, ' ')
+    .replace(/^\|\s*|\s*\|$/g, '')
     .trim();
+}
+
+function isDiscountActive(val) {
+  const s = String(val ?? '').trim().toLowerCase();
+  return val === true || s === 'כן' || s === 'yes' || s === 'true' || s === '1';
+}
+
+function getMerchantDisplayName(merchant) {
+  return cleanText(
+    merchant?.commercial_name ||
+      merchant?.chit_name ||
+      merchant?.marketing_name ||
+      merchant?.name ||
+      merchant?.title ||
+      merchant?.business_name ||
+      ''
+  );
 }
 
 function buildWalletExternalId(groupId, merchantName) {
@@ -204,15 +266,10 @@ function buildWalletExternalId(groupId, merchantName) {
   return `pais_cc_${groupId}_${normalized}`;
 }
 
-function parseTierDiscounts(group) {
-  const tierList = Array.isArray(group?.discounts?.[PAIS_TIER])
-    ? group.discounts[PAIS_TIER]
-    : Array.isArray(group?.discounts?.regular)
-    ? group.discounts.regular
-    : [];
-
-  const activeTiers = tierList
-    .filter((d) => String(d.active || '').trim() === 'כן' || d.active === true)
+function summarizeDiscountList(rawList) {
+  const list = Array.isArray(rawList) ? rawList : [];
+  const activeTiers = list
+    .filter((d) => isDiscountActive(d?.active))
     .sort((a, b) => Number(a.from_amount || 0) - Number(b.from_amount || 0));
 
   if (activeTiers.length === 0) return null;
@@ -232,6 +289,30 @@ function parseTierDiscounts(group) {
     monthlyLimit: Number(primaryTier.to_amount || 0) || null,
     tiersSummary,
   };
+}
+
+function parseTierDiscounts(group) {
+  const tierList = Array.isArray(group?.discounts?.[PAIS_TIER])
+    ? group.discounts[PAIS_TIER]
+    : Array.isArray(group?.discounts?.regular)
+    ? group.discounts.regular
+    : [];
+
+  return summarizeDiscountList(tierList);
+}
+
+function parseChitDiscounts(chit, fallbackDiscountInfo) {
+  if (Array.isArray(chit?.topup_rules) && chit.topup_rules.length > 0) {
+    const ruleForTier =
+      chit.topup_rules.find((r) => String(r?.rule_member || '').toLowerCase() === PAIS_TIER) ||
+      chit.topup_rules.find((r) => String(r?.rule_member || '').toLowerCase() === 'regular') ||
+      chit.topup_rules[0];
+
+    const parsedFromRule = summarizeDiscountList(ruleForTier?.topup_rule_discounts);
+    if (parsedFromRule) return parsedFromRule;
+  }
+
+  return fallbackDiscountInfo;
 }
 
 function extractSupplierName(product, fallbackCategoryName) {
@@ -304,11 +385,36 @@ function buildProductDescription(product) {
   return parts.join(' | ');
 }
 
+function buildMerchantTerms(merchant) {
+  const parts = [];
+  if (merchant?.short_description) parts.push(cleanText(merchant.short_description));
+  if (merchant?.limitations_text) parts.push(cleanText(merchant.limitations_text));
+  if (merchant?.terms_of_use) parts.push(cleanText(merchant.terms_of_use));
+  if (merchant?.terms) parts.push(cleanText(merchant.terms));
+  if (merchant?.redemption_info) parts.push(cleanText(merchant.redemption_info));
+  if (merchant?.branches_page_url) parts.push(`סניפים: ${cleanText(merchant.branches_page_url)}`);
+  return [...new Set(parts.filter(Boolean))].join(' | ') || null;
+}
+
+function safeParseJson(text, label) {
+  try {
+    return JSON.parse(text);
+  } catch (err) {
+    console.warn(`⚠️ JSON לא תקין / נחתך ב-${label}: ${err.message}`);
+    return null;
+  }
+}
+
 async function fetchPaisLobby() {
   const res = await fetch(PAIS_LOBBY_URL, {
     method: 'GET',
     headers: buildHeaders(PAIS_SESSION_PAGE_URL),
   });
+
+  const updatedCookies = getSetCookieHeaders(res);
+  if (updatedCookies.length > 0) {
+    activeCookieHeader = mergeCookies(activeCookieHeader, updatedCookies);
+  }
 
   const contentType = res.headers.get('content-type') || '';
   const text = await res.text();
@@ -319,12 +425,117 @@ async function fetchPaisLobby() {
     );
   }
 
-  const json = JSON.parse(text);
-  if (json.status_code !== 0 || !Array.isArray(json.groups)) {
-    throw new Error(`מבנה JSON לא צפוי ב-Lobby: status_code=${json.status_code}`);
+  const json = safeParseJson(text, 'Pais Lobby');
+  if (!json || json.status_code !== 0 || !Array.isArray(json.groups)) {
+    throw new Error(`מבנה JSON לא צפוי ב-Lobby: status_code=${json?.status_code}`);
   }
 
   return json.groups;
+}
+
+async function fetchChitMerchants(chitId, referer = PAIS_NETWORKS_PAGE_URL) {
+  const res = await fetch(PAIS_CHIT_MERCHANTS_URL, {
+    method: 'POST',
+    headers: {
+      ...buildHeaders(referer),
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({ chit_id: Number(chitId) }),
+  });
+
+  const updatedCookies = getSetCookieHeaders(res);
+  if (updatedCookies.length > 0) {
+    activeCookieHeader = mergeCookies(activeCookieHeader, updatedCookies);
+  }
+
+  const contentType = res.headers.get('content-type') || '';
+  const text = await res.text();
+
+  if (!res.ok || !contentType.includes('application/json')) {
+    throw new Error(
+      `HTTP ${res.status} עבור chit_id=${chitId} (content-type: ${contentType}): ${text.slice(0, 150)}`
+    );
+  }
+
+  const json = safeParseJson(text, `chit_id=${chitId}`);
+  if (!json) return [];
+  if (Array.isArray(json)) return json;
+  if (Array.isArray(json.merchants)) return json.merchants;
+  if (Array.isArray(json.data)) return json.data;
+  if (Array.isArray(json.items)) return json.items;
+  return [];
+}
+
+function buildWalletRowFromMerchant({ merchant, chitId, groupName, walletUrl, discountInfo }) {
+  const title = getMerchantDisplayName(merchant);
+  if (!title) return null;
+
+  const effectiveChitId = merchant?.chit_id ?? chitId;
+  const externalId = buildWalletExternalId(effectiveChitId, title);
+  const effectiveDiscount = parseChitDiscounts(merchant, discountInfo);
+  const merchantTerms = buildMerchantTerms(merchant);
+  const tagNames = Array.isArray(merchant?.tags)
+    ? merchant.tags.map((t) => cleanText(t?.tag_name)).filter(Boolean)
+    : [];
+
+  return {
+    external_id: externalId,
+    club_source: 'pais',
+    benefit_type: 'wallet',
+    is_active: true,
+    title,
+    supplier_name: title,
+    wallet_name: groupName,
+    discount_percent: effectiveDiscount?.discountPercent ?? null,
+    monthly_limit: effectiveDiscount?.monthlyLimit ?? null,
+    terms_of_use: merchantTerms,
+    search_keywords: [
+      groupName,
+      title,
+      ...tagNames,
+      effectiveDiscount?.tiersSummary,
+      merchantTerms,
+    ]
+      .filter(Boolean)
+      .join(' | '),
+    url: merchant?.site_url || merchant?.url || walletUrl,
+  };
+}
+
+async function fetchGroupChitsFromTopupUrl(topupRelUrl) {
+  if (!topupRelUrl) return [];
+  const fullUrl = `${PAIS_BASE_URL}${topupRelUrl.startsWith('/') ? '' : '/'}${topupRelUrl}`;
+
+  for (const method of ['GET', 'POST']) {
+    try {
+      const res = await fetch(fullUrl, {
+        method,
+        headers: {
+          ...buildHeaders(fullUrl),
+          ...(method === 'POST' ? { 'content-type': 'application/json' } : {}),
+        },
+        ...(method === 'POST' ? { body: JSON.stringify({}) } : {}),
+      });
+
+      const updatedCookies = getSetCookieHeaders(res);
+      if (updatedCookies.length > 0) {
+        activeCookieHeader = mergeCookies(activeCookieHeader, updatedCookies);
+      }
+
+      const contentType = res.headers.get('content-type') || '';
+      const text = await res.text();
+      if (!res.ok || !contentType.includes('application/json')) continue;
+
+      const json = safeParseJson(text, `topupUrl=${topupRelUrl}`);
+      if (Array.isArray(json?.chits) && json.chits.length > 0) {
+        return json.chits;
+      }
+    } catch {
+      // ננסה שיטה/כתובת חלופית
+    }
+  }
+
+  return [];
 }
 
 async function fetchPaisCategoryPage(categoryId, skip = 0) {
@@ -350,9 +561,9 @@ async function fetchPaisCategoryPage(categoryId, skip = 0) {
     );
   }
 
-  const json = JSON.parse(text);
-  if (json.status_code !== 0) {
-    throw new Error(`סטטוס לא תקין בקטגוריה ${categoryId}: status_code=${json.status_code}`);
+  const json = safeParseJson(text, `category/${categoryId}`);
+  if (!json || json.status_code !== 0) {
+    throw new Error(`סטטוס לא תקין בקטגוריה ${categoryId}: status_code=${json?.status_code}`);
   }
 
   return json;
@@ -435,10 +646,16 @@ async function syncPais() {
 
   const rowsToUpsert = [];
   const seenExternalIds = new Set();
+  const syncedChitIds = new Set();
 
-  // 1. תווים נטענים מאוחדים (wallet)
-  const groups = await fetchPaisLobby();
-  console.log(`📦 התקבלו ${groups.length} קבוצות תווים נטענים`);
+  // 1. תווים נטענים מאוחדים (wallet) מתוך Lobby
+  let groups = [];
+  try {
+    groups = await fetchPaisLobby();
+    console.log(`📦 התקבלו ${groups.length} קבוצות תווים נטענים`);
+  } catch (err) {
+    console.warn(`⚠️ אזהרה בטעינת Lobby: ${err.message}`);
+  }
 
   for (const group of groups) {
     const groupName = cleanText(group.name);
@@ -453,32 +670,95 @@ async function syncPais() {
       ? `${PAIS_BASE_URL}${group.topup_rel_url.startsWith('/') ? '' : '/'}${group.topup_rel_url}`
       : PAIS_SESSION_PAGE_URL;
 
-    const merchants = Array.isArray(group.merchants) ? group.merchants : [];
+    const mappedChitId = group.chit_id ?? GROUP_TO_CHIT[String(group.id)] ?? null;
+    let merchants = Array.isArray(group.merchants) ? [...group.merchants] : [];
+
+    if (mappedChitId) {
+      syncedChitIds.add(Number(mappedChitId));
+      const referer = Number(mappedChitId) === 5002 ? PAIS_RESTAURANTS_PAGE_URL : PAIS_NETWORKS_PAGE_URL;
+      try {
+        const fetchedMerchants = await fetchChitMerchants(mappedChitId, referer);
+        if (fetchedMerchants.length > 0) {
+          const existingNames = new Set(merchants.map((m) => getMerchantDisplayName(m).toLowerCase()));
+          for (const fm of fetchedMerchants) {
+            const fname = getMerchantDisplayName(fm);
+            if (fname && !existingNames.has(fname.toLowerCase())) {
+              merchants.push(fm);
+              existingNames.add(fname.toLowerCase());
+            }
+          }
+        }
+        if (FETCH_DELAY_MS > 0) await sleep(FETCH_DELAY_MS);
+      } catch (err) {
+        console.warn(
+          `⚠️ לא ניתן למשוך רשימה מלאה עבור קבוצה ${groupName} (chit_id=${mappedChitId}): ${err.message}`
+        );
+      }
+    } else if (group.topup_rel_url) {
+      const chitsList = await fetchGroupChitsFromTopupUrl(group.topup_rel_url);
+      if (chitsList.length > 0) {
+        const existingNames = new Set(merchants.map((m) => getMerchantDisplayName(m).toLowerCase()));
+        for (const chit of chitsList) {
+          const cname = getMerchantDisplayName(chit);
+          if (cname && !existingNames.has(cname.toLowerCase())) {
+            merchants.push(chit);
+            existingNames.add(cname.toLowerCase());
+          }
+        }
+      }
+      if (FETCH_DELAY_MS > 0) await sleep(FETCH_DELAY_MS);
+    }
+
+    const idForKey = mappedChitId ?? group.id;
     console.log(
-      `  • [Wallet] ${groupName}: ${discountInfo.discountPercent}% (עד ${discountInfo.monthlyLimit} ₪) | ${merchants.length} בתי עסק`
+      `  • [Wallet] ${groupName} (chit_id=${idForKey}): ${discountInfo.discountPercent}% (עד ${discountInfo.monthlyLimit} ₪) | ${merchants.length} בתי עסק`
     );
 
     for (const merchant of merchants) {
-      const title = cleanText(merchant.name);
-      if (!title) continue;
-
-      const externalId = buildWalletExternalId(group.id, title);
-      if (seenExternalIds.has(externalId)) continue;
-      seenExternalIds.add(externalId);
-
-      rowsToUpsert.push({
-        external_id: externalId,
-        club_source: 'pais',
-        benefit_type: 'wallet',
-        is_active: true,
-        title,
-        supplier_name: title,
-        wallet_name: groupName,
-        discount_percent: discountInfo.discountPercent,
-        monthly_limit: discountInfo.monthlyLimit,
-        search_keywords: `${groupName} | ${title} | ${discountInfo.tiersSummary}`,
-        url: topupUrl,
+      const row = buildWalletRowFromMerchant({
+        merchant,
+        chitId: idForKey,
+        groupName,
+        walletUrl: topupUrl,
+        discountInfo,
       });
+      if (!row || seenExternalIds.has(row.external_id)) continue;
+      seenExternalIds.add(row.external_id);
+      rowsToUpsert.push(row);
+    }
+  }
+
+  // 1ב. משיכה ישירה של chit_ids נוספים אם הוגדרו ב-PAIS_CHIT_IDS
+  for (const chitId of EXTRA_CHIT_IDS) {
+    if (syncedChitIds.has(chitId)) continue;
+    syncedChitIds.add(chitId);
+
+    try {
+      const referer = chitId === 5002 ? PAIS_RESTAURANTS_PAGE_URL : PAIS_NETWORKS_PAGE_URL;
+      const fetchedMerchants = await fetchChitMerchants(chitId, referer);
+      const groupLabel = chitId === 5002 ? 'תו נטען מסעדות' : `תו ${chitId}`;
+      let addedFromChit = 0;
+
+      for (const merchant of fetchedMerchants) {
+        const row = buildWalletRowFromMerchant({
+          merchant,
+          chitId,
+          groupName: groupLabel,
+          walletUrl: referer,
+          discountInfo: null,
+        });
+        if (!row || seenExternalIds.has(row.external_id)) continue;
+        seenExternalIds.add(row.external_id);
+        rowsToUpsert.push(row);
+        addedFromChit++;
+      }
+
+      console.log(
+        `  • [Wallet Chit ${chitId}] ${groupLabel}: נוספו ${addedFromChit} בתי עסק/רשתות`
+      );
+      if (FETCH_DELAY_MS > 0) await sleep(FETCH_DELAY_MS);
+    } catch (err) {
+      console.warn(`⚠️ אזהרה במשיכת רשתות עבור chit_id=${chitId}: ${err.message}`);
     }
   }
 
