@@ -16,6 +16,7 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 
 const PAIS_LOBBY_URL = 'https://paisplus.co.il/cashcards/binding-chit/lobby/get';
+const PAIS_CARDS_URL = 'https://paisplus.co.il/cashcards/binding-chit/cards/get';
 const PAIS_CHIT_MERCHANTS_URL = 'https://paisplus.co.il/cashcards/binding-chit/merchants';
 const PAIS_NETWORKS_PAGE_URL = 'https://paisplus.co.il/cashcards/networks';
 const PAIS_RESTAURANTS_PAGE_URL = 'https://paisplus.co.il/cashcards/restaurants';
@@ -56,7 +57,7 @@ const EXTRA_CHIT_IDS = String(process.env.PAIS_CHIT_IDS || '')
 
 const AUTO_DISCOVER = String(process.env.PAIS_AUTO_DISCOVER ?? 'true').toLowerCase() !== 'false';
 const MAX_CATEGORIES = Math.max(1, Number(process.env.PAIS_MAX_CATEGORIES || 350));
-const FETCH_DELAY_MS = Math.max(0, Number(process.env.PAIS_FETCH_DELAY_MS || 150));
+const FETCH_DELAY_MS = Math.max(0, Number(process.env.PAIS_FETCH_DELAY_MS || 200));
 
 const MANUAL_CATEGORY_IDS = String(process.env.PAIS_CATEGORY_IDS || '')
   .split(',')
@@ -97,6 +98,21 @@ const manualXsrfToken = String(process.env.PAIS_XSRF_TOKEN || '').trim();
 function sleep(ms) {
   if (!ms) return Promise.resolve();
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function withRetry(fn, retries = 3, baseDelayMs = 400) {
+  let lastErr;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      if (attempt < retries) {
+        await sleep(baseDelayMs * (attempt + 1));
+      }
+    }
+  }
+  throw lastErr;
 }
 
 function getSetCookieHeaders(res) {
@@ -433,6 +449,32 @@ async function fetchPaisLobby() {
   return json.groups;
 }
 
+async function fetchGroupChits(groupId, referer) {
+  const res = await fetch(PAIS_CARDS_URL, {
+    method: 'POST',
+    headers: { ...buildHeaders(referer), 'content-type': 'application/json' },
+    body: JSON.stringify({ chit_group_id: Number(groupId) }),
+  });
+
+  const updatedCookies = getSetCookieHeaders(res);
+  if (updatedCookies.length > 0) {
+    activeCookieHeader = mergeCookies(activeCookieHeader, updatedCookies);
+  }
+
+  const text = await res.text();
+  if (!res.ok) {
+    throw new Error(`HTTP ${res.status} עבור chit_group_id=${groupId}: ${text.slice(0, 150)}`);
+  }
+
+  const json = safeParseJson(text, `cards/get group=${groupId}`);
+  if (!json || json.status_code !== 0) {
+    throw new Error(
+      `status_code=${json?.status_code} (${json?.status_msg || ''}) עבור chit_group_id=${groupId}`
+    );
+  }
+  return Array.isArray(json.chits) ? json.chits : [];
+}
+
 async function fetchChitMerchants(chitId, referer = PAIS_NETWORKS_PAGE_URL) {
   const res = await fetch(PAIS_CHIT_MERCHANTS_URL, {
     method: 'POST',
@@ -502,71 +544,37 @@ function buildWalletRowFromMerchant({ merchant, chitId, groupName, walletUrl, di
   };
 }
 
-async function fetchGroupChitsFromTopupUrl(topupRelUrl) {
-  if (!topupRelUrl) return [];
-  const fullUrl = `${PAIS_BASE_URL}${topupRelUrl.startsWith('/') ? '' : '/'}${topupRelUrl}`;
-
-  for (const method of ['GET', 'POST']) {
-    try {
-      const res = await fetch(fullUrl, {
-        method,
-        headers: {
-          ...buildHeaders(fullUrl),
-          ...(method === 'POST' ? { 'content-type': 'application/json' } : {}),
-        },
-        ...(method === 'POST' ? { body: JSON.stringify({}) } : {}),
-      });
-
-      const updatedCookies = getSetCookieHeaders(res);
-      if (updatedCookies.length > 0) {
-        activeCookieHeader = mergeCookies(activeCookieHeader, updatedCookies);
-      }
-
-      const contentType = res.headers.get('content-type') || '';
-      const text = await res.text();
-      if (!res.ok || !contentType.includes('application/json')) continue;
-
-      const json = safeParseJson(text, `topupUrl=${topupRelUrl}`);
-      if (Array.isArray(json?.chits) && json.chits.length > 0) {
-        return json.chits;
-      }
-    } catch {
-      // ננסה שיטה/כתובת חלופית
-    }
-  }
-
-  return [];
-}
-
 async function fetchPaisCategoryPage(categoryId, skip = 0) {
   const baseUrl = `${PAIS_BASE_URL}/category/${categoryId}`;
   const url = skip > 0 ? `${baseUrl}?skip=${skip}` : baseUrl;
 
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: buildHeaders(baseUrl),
-  });
+  return withRetry(async () => {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: buildHeaders(baseUrl),
+    });
 
-  const updatedCookies = getSetCookieHeaders(res);
-  if (updatedCookies.length > 0) {
-    activeCookieHeader = mergeCookies(activeCookieHeader, updatedCookies);
-  }
+    const updatedCookies = getSetCookieHeaders(res);
+    if (updatedCookies.length > 0) {
+      activeCookieHeader = mergeCookies(activeCookieHeader, updatedCookies);
+    }
 
-  const contentType = res.headers.get('content-type') || '';
-  const text = await res.text();
+    const contentType = res.headers.get('content-type') || '';
+    const text = await res.text();
 
-  if (!res.ok || !contentType.includes('application/json')) {
-    throw new Error(
-      `תגובה לא תקינה מקטגוריה ${categoryId} (HTTP ${res.status}): ${text.slice(0, 200)}`
-    );
-  }
+    if (!res.ok || !contentType.includes('application/json')) {
+      throw new Error(
+        `תגובה לא תקינה מקטגוריה ${categoryId} (HTTP ${res.status}): ${text.slice(0, 200)}`
+      );
+    }
 
-  const json = safeParseJson(text, `category/${categoryId}`);
-  if (!json || json.status_code !== 0) {
-    throw new Error(`סטטוס לא תקין בקטגוריה ${categoryId}: status_code=${json?.status_code}`);
-  }
+    const json = safeParseJson(text, `category/${categoryId}`);
+    if (!json || json.status_code !== 0) {
+      throw new Error(`סטטוס לא תקין בקטגוריה ${categoryId}: status_code=${json?.status_code}`);
+    }
 
-  return json;
+    return json;
+  }, 2, 300);
 }
 
 function collectSubcategoryIds(subcategories, outQueue) {
@@ -648,7 +656,7 @@ async function syncPais() {
   const seenExternalIds = new Set();
   const syncedChitIds = new Set();
 
-  // 1. תווים נטענים מאוחדים (wallet) מתוך Lobby
+  // 1. תווים נטענים מאוחדים (wallet) מתוך Lobby + cards/get
   let groups = [];
   try {
     groups = await fetchPaisLobby();
@@ -673,7 +681,20 @@ async function syncPais() {
     const mappedChitId = group.chit_id ?? GROUP_TO_CHIT[String(group.id)] ?? null;
     let merchants = Array.isArray(group.merchants) ? [...group.merchants] : [];
 
-    if (mappedChitId) {
+    let loadedFromCardsGet = false;
+    try {
+      const chits = await fetchGroupChits(group.id, topupUrl);
+      if (chits.length > 0) {
+        merchants = chits;
+        loadedFromCardsGet = true;
+      } else {
+        console.warn(`⚠️ cards/get החזיר 0 chits עבור קבוצה ${groupName} (${group.id})`);
+      }
+    } catch (err) {
+      console.warn(`⚠️ לא ניתן למשוך chits עבור קבוצה ${groupName} (${group.id}): ${err.message}`);
+    }
+
+    if (!loadedFromCardsGet && mappedChitId) {
       syncedChitIds.add(Number(mappedChitId));
       const referer = Number(mappedChitId) === 5002 ? PAIS_RESTAURANTS_PAGE_URL : PAIS_NETWORKS_PAGE_URL;
       try {
@@ -688,30 +709,18 @@ async function syncPais() {
             }
           }
         }
-        if (FETCH_DELAY_MS > 0) await sleep(FETCH_DELAY_MS);
       } catch (err) {
         console.warn(
           `⚠️ לא ניתן למשוך רשימה מלאה עבור קבוצה ${groupName} (chit_id=${mappedChitId}): ${err.message}`
         );
       }
-    } else if (group.topup_rel_url) {
-      const chitsList = await fetchGroupChitsFromTopupUrl(group.topup_rel_url);
-      if (chitsList.length > 0) {
-        const existingNames = new Set(merchants.map((m) => getMerchantDisplayName(m).toLowerCase()));
-        for (const chit of chitsList) {
-          const cname = getMerchantDisplayName(chit);
-          if (cname && !existingNames.has(cname.toLowerCase())) {
-            merchants.push(chit);
-            existingNames.add(cname.toLowerCase());
-          }
-        }
-      }
-      if (FETCH_DELAY_MS > 0) await sleep(FETCH_DELAY_MS);
     }
 
-    const idForKey = mappedChitId ?? group.id;
+    if (FETCH_DELAY_MS > 0) await sleep(FETCH_DELAY_MS);
+
+    const idForKey = loadedFromCardsGet ? `group_${group.id}` : (mappedChitId ?? group.id);
     console.log(
-      `  • [Wallet] ${groupName} (chit_id=${idForKey}): ${discountInfo.discountPercent}% (עד ${discountInfo.monthlyLimit} ₪) | ${merchants.length} בתי עסק`
+      `  • [Wallet] ${groupName} (${idForKey}): ${discountInfo.discountPercent}% (עד ${discountInfo.monthlyLimit} ₪) | ${merchants.length} בתי עסק`
     );
 
     for (const merchant of merchants) {
@@ -887,16 +896,18 @@ async function syncPais() {
     throw new Error('לא נמצאו רשומות תקינות לסנכרון עבור pais');
   }
 
-  const BATCH_SIZE = 500;
+  const BATCH_SIZE = 100;
   for (let i = 0; i < rowsToUpsert.length; i += BATCH_SIZE) {
     const batch = rowsToUpsert.slice(i, i + BATCH_SIZE);
-    const { error: upsertErr } = await supabase
-      .from('club_benefits')
-      .upsert(batch, { onConflict: 'external_id' });
+    await withRetry(async () => {
+      const { error: upsertErr } = await supabase
+        .from('club_benefits')
+        .upsert(batch, { onConflict: 'external_id' });
 
-    if (upsertErr) {
-      throw new Error(`שגיאה ב-upsert ל-club_benefits (batch ${i}): ${upsertErr.message}`);
-    }
+      if (upsertErr) {
+        throw new Error(`שגיאה ב-upsert ל-club_benefits (batch ${i}): ${upsertErr.message}`);
+      }
+    }, 3, 500);
   }
 
   const deactivatedCount = await deactivateStaleBenefits(seenExternalIds, hasCategoryErrors);
