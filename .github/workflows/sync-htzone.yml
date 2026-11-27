@@ -1,8 +1,7 @@
-name: Sync Hi-Tech Zone Catalog
+﻿name: Sync Hi-Tech Zone Catalog
 
 on:
   schedule:
-    # הרצה יומית ב-04:00 UTC (06:00 שעון ישראל / 07:00 שעון קיץ)
     - cron: '0 4 * * *'
   workflow_dispatch:
 
@@ -18,7 +17,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           cache: 'npm'
 
       - name: Install dependencies
